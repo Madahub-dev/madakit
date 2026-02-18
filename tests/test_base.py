@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from mada_modelkit._base import BaseAgentClient
-from mada_modelkit._types import AgentRequest, AgentResponse
+from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
 
 
 class _ConcreteClient(BaseAgentClient):
@@ -87,3 +87,53 @@ class TestConcreteClient:
         request = AgentRequest(prompt="test", max_tokens=512)
         response = await client.send_request(request)
         assert response.input_tokens == 256  # max_tokens // 2
+
+
+class TestSendRequestStreamDefault:
+    """Tests for the default send_request_stream implementation."""
+
+    @pytest.mark.asyncio
+    async def test_yields_one_chunk(self) -> None:
+        """Default stream yields exactly one StreamChunk."""
+        client = _ConcreteClient()
+        chunks = [chunk async for chunk in client.send_request_stream(AgentRequest(prompt="hi"))]
+        assert len(chunks) == 1
+
+    @pytest.mark.asyncio
+    async def test_chunk_is_stream_chunk(self) -> None:
+        """The yielded item is a StreamChunk instance."""
+        client = _ConcreteClient()
+        chunks = [chunk async for chunk in client.send_request_stream(AgentRequest(prompt="hi"))]
+        assert isinstance(chunks[0], StreamChunk)
+
+    @pytest.mark.asyncio
+    async def test_chunk_delta_matches_response_content(self) -> None:
+        """The chunk's delta equals the full response content."""
+        client = _ConcreteClient()
+        chunks = [chunk async for chunk in client.send_request_stream(AgentRequest(prompt="hi"))]
+        assert chunks[0].delta == "ok"
+
+    @pytest.mark.asyncio
+    async def test_chunk_is_final(self) -> None:
+        """The single yielded chunk has is_final=True."""
+        client = _ConcreteClient()
+        chunks = [chunk async for chunk in client.send_request_stream(AgentRequest(prompt="hi"))]
+        assert chunks[0].is_final is True
+
+    @pytest.mark.asyncio
+    async def test_stream_delegates_to_send_request(self) -> None:
+        """Default stream calls send_request internally to produce the chunk."""
+        call_log: list[AgentRequest] = []
+
+        class _TrackingClient(BaseAgentClient):
+            async def send_request(self, request: AgentRequest) -> AgentResponse:
+                """Record the call and return a fixed response."""
+                call_log.append(request)
+                return AgentResponse(content="tracked", model="m", input_tokens=1, output_tokens=1)
+
+        client = _TrackingClient()
+        request = AgentRequest(prompt="trace me")
+        chunks = [chunk async for chunk in client.send_request_stream(request)]
+        assert len(call_log) == 1
+        assert call_log[0] is request
+        assert chunks[0].delta == "tracked"
