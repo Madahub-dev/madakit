@@ -1,9 +1,11 @@
-"""Tests for FallbackMiddleware constructor (task 2.5.1).
+"""Tests for FallbackMiddleware constructor and sequential send_request (tasks 2.5.1–2.5.2).
 
 Covers: primary storage, fallbacks list storage and order, default
 fast_fail_ms (None), custom fast_fail_ms storage, BaseAgentClient
 inheritance, semaphore absence, empty fallbacks list, per-instance
-independence, and stub delegation to the primary client.
+independence, stub delegation to the primary client, sequential fallback
+on primary failure, ordered fallback traversal, last-exception propagation,
+no-fallback edge case, and call-count verification.
 """
 
 from __future__ import annotations
@@ -131,3 +133,128 @@ class TestStubDelegation:
         middleware = FallbackMiddleware(primary=primary, fallbacks=[])
         await middleware.send_request(AgentRequest(prompt="hi"))
         assert primary.call_count == 1
+
+
+class TestSequentialSendRequest:
+    """FallbackMiddleware.send_request — sequential fallback logic."""
+
+    @pytest.mark.asyncio
+    async def test_primary_success_returns_primary_response(self) -> None:
+        """Asserts that the primary response is returned when the primary succeeds."""
+        expected = AgentResponse(content="primary", model="m", input_tokens=1, output_tokens=1)
+        middleware = FallbackMiddleware(
+            primary=MockProvider(responses=[expected]),
+            fallbacks=[MockProvider()],
+        )
+        result = await middleware.send_request(AgentRequest(prompt="hi"))
+        assert result is expected
+
+    @pytest.mark.asyncio
+    async def test_primary_success_does_not_call_fallback(self) -> None:
+        """Asserts that fallbacks are not invoked when the primary succeeds."""
+        fallback = MockProvider()
+        middleware = FallbackMiddleware(primary=MockProvider(), fallbacks=[fallback])
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert fallback.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_primary_failure_tries_first_fallback(self) -> None:
+        """Asserts that the first fallback is called when the primary raises."""
+        fallback = MockProvider()
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("primary down")]),
+            fallbacks=[fallback],
+        )
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert fallback.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_primary_failure_returns_first_fallback_response(self) -> None:
+        """Asserts that the first fallback's response is returned when the primary fails."""
+        expected = AgentResponse(content="fallback", model="fb", input_tokens=1, output_tokens=1)
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("down")]),
+            fallbacks=[MockProvider(responses=[expected])],
+        )
+        result = await middleware.send_request(AgentRequest(prompt="hi"))
+        assert result is expected
+
+    @pytest.mark.asyncio
+    async def test_fallbacks_tried_in_order(self) -> None:
+        """Asserts that fallbacks are tried sequentially: f1 before f2."""
+        f1 = MockProvider(errors=[RuntimeError("f1 down")])
+        f2 = MockProvider()
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("primary down")]),
+            fallbacks=[f1, f2],
+        )
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert f1.call_count == 1
+        assert f2.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_second_fallback_not_tried_when_first_succeeds(self) -> None:
+        """Asserts that fallback traversal stops at the first success."""
+        f2 = MockProvider()
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("down")]),
+            fallbacks=[MockProvider(), f2],
+        )
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert f2.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_all_fail_raises_last_exception(self) -> None:
+        """Asserts that the last fallback's exception is raised when every client fails."""
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("primary")]),
+            fallbacks=[
+                MockProvider(errors=[RuntimeError("f1")]),
+                MockProvider(errors=[ValueError("last")]),
+            ],
+        )
+        with pytest.raises(ValueError, match="last"):
+            await middleware.send_request(AgentRequest(prompt="hi"))
+
+    @pytest.mark.asyncio
+    async def test_all_fail_exception_type_is_preserved(self) -> None:
+        """Asserts that the last exception's type is not wrapped."""
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("primary")]),
+            fallbacks=[MockProvider(errors=[TypeError("last")])],
+        )
+        with pytest.raises(TypeError):
+            await middleware.send_request(AgentRequest(prompt="hi"))
+
+    @pytest.mark.asyncio
+    async def test_no_fallbacks_raises_primary_exception(self) -> None:
+        """Asserts that the primary exception propagates when fallbacks list is empty."""
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("only one")]),
+            fallbacks=[],
+        )
+        with pytest.raises(RuntimeError, match="only one"):
+            await middleware.send_request(AgentRequest(prompt="hi"))
+
+    @pytest.mark.asyncio
+    async def test_primary_call_count_is_one_on_failure(self) -> None:
+        """Asserts that the primary is called exactly once even when it fails."""
+        primary = MockProvider(errors=[RuntimeError("down")])
+        middleware = FallbackMiddleware(primary=primary, fallbacks=[MockProvider()])
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert primary.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_third_fallback_wins_when_first_two_fail(self) -> None:
+        """Asserts that the correct response is returned when two fallbacks fail first."""
+        expected = AgentResponse(content="third", model="m", input_tokens=1, output_tokens=1)
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("p")]),
+            fallbacks=[
+                MockProvider(errors=[RuntimeError("f1")]),
+                MockProvider(errors=[RuntimeError("f2")]),
+                MockProvider(responses=[expected]),
+            ],
+        )
+        result = await middleware.send_request(AgentRequest(prompt="hi"))
+        assert result is expected

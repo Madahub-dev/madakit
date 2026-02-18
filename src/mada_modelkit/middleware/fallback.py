@@ -42,8 +42,21 @@ class FallbackMiddleware(BaseAgentClient):
         self._fast_fail_ms = fast_fail_ms
 
     async def send_request(self, request: AgentRequest) -> AgentResponse:
-        """Delegate to primary (stub; sequential and hedged logic added in tasks 2.5.2–2.5.3)."""
-        return await self._primary.send_request(request)
+        """Try primary then each fallback in order; first success wins.
+
+        Iterates ``[primary] + fallbacks`` sequentially. Returns the first
+        successful response. If every client raises, re-raises the exception
+        from the last client attempted. When ``fast_fail_ms`` is set, hedging
+        logic applies instead (task 2.5.3).
+        """
+        last_exc: Exception | None = None
+        for client in [self._primary, *self._fallbacks]:
+            try:
+                return await client.send_request(request)
+            except Exception as exc:
+                last_exc = exc
+        assert last_exc is not None
+        raise last_exc
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
         """Delegate to primary (stub; pre-first-chunk fallback added in task 2.5.4)."""
