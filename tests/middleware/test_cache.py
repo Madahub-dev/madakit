@@ -1,9 +1,11 @@
-"""Tests for CachingMiddleware constructor (task 2.3.1).
+"""Tests for CachingMiddleware constructor and default cache key function (tasks 2.3.1–2.3.2).
 
 Covers: client storage, default parameter values (ttl, max_entries, key_fn),
 custom parameter storage, initial state of _cache and _in_flight (both empty
 dicts), BaseAgentClient inheritance, semaphore absence, per-instance isolation,
-stub delegation to the wrapped client, and middleware composition.
+stub delegation to the wrapped client, middleware composition, and
+_default_key_fn (determinism, field sensitivity, SHA-256 hex output, stop list
+conversion, callable as a static method).
 """
 
 from __future__ import annotations
@@ -136,3 +138,76 @@ class TestStubDelegation:
         middleware = CachingMiddleware(client=provider)
         await middleware.send_request(AgentRequest(prompt="hi"))
         assert provider.call_count == 1
+
+
+class TestDefaultKeyFn:
+    """CachingMiddleware._default_key_fn — stable hash of cacheable request fields."""
+
+    def test_same_request_produces_same_key(self) -> None:
+        """Asserts that calling _default_key_fn twice with an identical request returns the same key."""
+        req = AgentRequest(prompt="hello")
+        assert CachingMiddleware._default_key_fn(req) == CachingMiddleware._default_key_fn(req)
+
+    def test_different_prompts_produce_different_keys(self) -> None:
+        """Asserts that requests differing only in prompt produce distinct keys."""
+        k1 = CachingMiddleware._default_key_fn(AgentRequest(prompt="hello"))
+        k2 = CachingMiddleware._default_key_fn(AgentRequest(prompt="world"))
+        assert k1 != k2
+
+    def test_different_system_prompt_produces_different_keys(self) -> None:
+        """Asserts that requests differing only in system_prompt produce distinct keys."""
+        k1 = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi", system_prompt=None))
+        k2 = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi", system_prompt="sys"))
+        assert k1 != k2
+
+    def test_different_max_tokens_produces_different_keys(self) -> None:
+        """Asserts that requests differing only in max_tokens produce distinct keys."""
+        k1 = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi", max_tokens=100))
+        k2 = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi", max_tokens=200))
+        assert k1 != k2
+
+    def test_different_temperature_produces_different_keys(self) -> None:
+        """Asserts that requests differing only in temperature produce distinct keys."""
+        k1 = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi", temperature=0.0))
+        k2 = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi", temperature=1.0))
+        assert k1 != k2
+
+    def test_different_stop_produces_different_keys(self) -> None:
+        """Asserts that requests differing only in stop sequences produce distinct keys."""
+        k1 = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi", stop=["END"]))
+        k2 = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi", stop=["STOP"]))
+        assert k1 != k2
+
+    def test_stop_none_vs_empty_list_produce_different_keys(self) -> None:
+        """Asserts that stop=None and stop=[] are treated as distinct cache keys."""
+        k1 = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi", stop=None))
+        k2 = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi", stop=[]))
+        assert k1 != k2
+
+    def test_stop_list_does_not_raise(self) -> None:
+        """Asserts that a stop list is accepted without raising a TypeError."""
+        key = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi", stop=["a", "b"]))
+        assert isinstance(key, str)
+
+    def test_returns_nonempty_string(self) -> None:
+        """Asserts that the returned cache key is a non-empty string."""
+        key = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi"))
+        assert isinstance(key, str)
+        assert len(key) > 0
+
+    def test_returns_64_char_hex_string(self) -> None:
+        """Asserts that the key is a 64-character lowercase hex string (SHA-256 digest)."""
+        key = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi"))
+        assert len(key) == 64
+        assert all(c in "0123456789abcdef" for c in key)
+
+    def test_callable_as_static_method(self) -> None:
+        """Asserts that _default_key_fn can be called on the class without an instance."""
+        key = CachingMiddleware._default_key_fn(AgentRequest(prompt="static"))
+        assert isinstance(key, str)
+
+    def test_metadata_and_attachments_do_not_affect_key(self) -> None:
+        """Asserts that metadata and attachments are excluded from the cache key."""
+        req1 = AgentRequest(prompt="hi", metadata={"x": 1})
+        req2 = AgentRequest(prompt="hi", metadata={"y": 2})
+        assert CachingMiddleware._default_key_fn(req1) == CachingMiddleware._default_key_fn(req2)

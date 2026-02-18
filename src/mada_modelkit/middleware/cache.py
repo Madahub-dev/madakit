@@ -8,6 +8,7 @@ requests. Zero external dependencies — stdlib only.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 from typing import AsyncIterator
 
@@ -44,6 +45,24 @@ class CachingMiddleware(BaseAgentClient):
         self._key_fn = key_fn
         self._cache: dict[str, tuple[AgentResponse, float]] = {}
         self._in_flight: dict[str, asyncio.Lock] = {}
+
+    @staticmethod
+    def _default_key_fn(request: AgentRequest) -> str:
+        """Return a stable hex-digest cache key derived from the request's cacheable fields.
+
+        Hashes the tuple (prompt, system_prompt, max_tokens, temperature, stop) using
+        SHA-256. The stop list is converted to a tuple before hashing to ensure a
+        consistent string representation.
+        """
+        stop = tuple(request.stop) if request.stop is not None else None
+        key_data = str((
+            request.prompt,
+            request.system_prompt,
+            request.max_tokens,
+            request.temperature,
+            stop,
+        ))
+        return hashlib.sha256(key_data.encode()).hexdigest()
 
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Delegate to wrapped client (stub; full cache logic added in task 2.3.3)."""
