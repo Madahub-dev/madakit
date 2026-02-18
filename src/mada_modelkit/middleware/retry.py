@@ -86,6 +86,31 @@ class RetryMiddleware(BaseAgentClient):
         ) from last_exc
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
-        """Delegate streaming to the wrapped client (retry logic added in task 2.1.4)."""
-        async for chunk in self._client.send_request_stream(request):
-            yield chunk
+        """Stream response chunks, retrying failures before the first chunk is yielded.
+
+        The retry/backoff logic (same rules as send_request) applies only while no
+        chunk has been yielded. Once the first chunk reaches the consumer, any
+        subsequent streaming failure propagates directly without retry.
+        """
+        is_retryable = self._is_retryable if self._is_retryable is not None else self._default_is_retryable
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            first_yielded = False
+            try:
+                async for chunk in self._client.send_request_stream(request):
+                    first_yielded = True
+                    yield chunk
+                return
+            except Exception as exc:
+                if first_yielded:
+                    raise  # Post-first-chunk: propagate directly to consumer
+                last_exc = exc
+                if not is_retryable(exc):
+                    raise
+                if attempt < self._max_retries:
+                    await asyncio.sleep(self._backoff_base * 2**attempt)
+        assert last_exc is not None
+        raise RetryExhaustedError(
+            f"Stream failed after {self._max_retries + 1} attempt(s): {last_exc}",
+            last_error=last_exc,
+        ) from last_exc

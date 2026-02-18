@@ -1,11 +1,11 @@
-"""Tests for RetryMiddleware constructor, _default_is_retryable, and send_request
-(tasks 2.1.1–2.1.3).
+"""Tests for RetryMiddleware constructor, _default_is_retryable, send_request,
+and send_request_stream (tasks 2.1.1–2.1.4).
 
 Covers: attribute storage, default values, custom is_retryable predicate,
-BaseAgentClient inheritance, semaphore passthrough via super().__init__(),
-_default_is_retryable classification of ProviderError status codes and
-non-ProviderError exceptions, retry loop correctness, exponential backoff
-sleep timing, and RetryExhaustedError on exhaustion.
+BaseAgentClient inheritance, semaphore passthrough, _default_is_retryable
+classification, retry loop correctness, exponential backoff timing,
+RetryExhaustedError on exhaustion, and send_request_stream pre/post-first-chunk
+retry boundary behavior.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import pytest
 from helpers import MockProvider
 from mada_modelkit._base import BaseAgentClient
 from mada_modelkit._errors import ProviderError, RetryExhaustedError
+from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
 from mada_modelkit.middleware.retry import RetryMiddleware
 
 
@@ -354,3 +355,169 @@ class TestSendRequest:
                 await middleware.send_request(AgentRequest(prompt="hi"))
 
         assert mock_sleep.call_count == 2  # only between attempts, not after last
+
+
+# ---------------------------------------------------------------------------
+# Streaming helpers
+# ---------------------------------------------------------------------------
+
+
+class _PreFirstChunkFailProvider(BaseAgentClient):
+    """Raises before yielding any chunks; falls back to success_chunks when errors exhausted."""
+
+    def __init__(
+        self,
+        errors: list[Exception],
+        success_chunks: list[StreamChunk] | None = None,
+    ) -> None:
+        """Initialise with a list of errors to raise and optional success chunks."""
+        super().__init__()
+        self._errors = list(errors)
+        self._success_chunks = success_chunks or [
+            StreamChunk(delta="ok", is_final=True)
+        ]
+        self.call_count = 0
+
+    async def send_request(self, request: AgentRequest) -> AgentResponse:
+        """Not used directly; required to satisfy the ABC."""
+        return AgentResponse(content="ok", model="m", input_tokens=1, output_tokens=1)
+
+    async def send_request_stream(self, request: AgentRequest):  # type: ignore[override]
+        """Raise stored error (pre-first-chunk) or yield success_chunks."""
+        self.call_count += 1
+        if self._errors:
+            raise self._errors.pop(0)
+        for chunk in self._success_chunks:
+            yield chunk
+
+
+class _PostFirstChunkFailProvider(BaseAgentClient):
+    """Yields one chunk then raises to simulate a mid-stream failure."""
+
+    def __init__(self, first_chunk: StreamChunk, error: Exception) -> None:
+        """Initialise with the first chunk to yield and the error to raise after."""
+        super().__init__()
+        self._first_chunk = first_chunk
+        self._error = error
+        self.call_count = 0
+
+    async def send_request(self, request: AgentRequest) -> AgentResponse:
+        """Not used directly; required to satisfy the ABC."""
+        return AgentResponse(content="ok", model="m", input_tokens=1, output_tokens=1)
+
+    async def send_request_stream(self, request: AgentRequest):  # type: ignore[override]
+        """Yield one chunk then raise the stored error."""
+        self.call_count += 1
+        yield self._first_chunk
+        raise self._error
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestSendRequestStream:
+    """RetryMiddleware.send_request_stream — pre/post-first-chunk retry boundary."""
+
+    @pytest.mark.asyncio
+    async def test_success_yields_all_chunks(self) -> None:
+        """Asserts that a successful stream yields all chunks without retry."""
+        chunks_in = [StreamChunk(delta="a"), StreamChunk(delta="b", is_final=True)]
+        provider = _PreFirstChunkFailProvider(errors=[], success_chunks=chunks_in)
+        middleware = RetryMiddleware(client=provider, max_retries=2)
+
+        chunks_out = []
+        async for chunk in middleware.send_request_stream(AgentRequest(prompt="hi")):
+            chunks_out.append(chunk)
+
+        assert chunks_out == chunks_in
+        assert provider.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_pre_first_chunk_retryable_error_retried(self) -> None:
+        """Asserts that a retryable pre-first-chunk failure is retried until success."""
+        provider = _PreFirstChunkFailProvider(
+            errors=[ProviderError("err", 500), ProviderError("err", 500)],
+        )
+        with patch("mada_modelkit.middleware.retry.asyncio.sleep", new_callable=AsyncMock):
+            middleware = RetryMiddleware(client=provider, max_retries=3)
+            chunks = []
+            async for chunk in middleware.send_request_stream(AgentRequest(prompt="hi")):
+                chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert provider.call_count == 3  # 2 failures + 1 success
+
+    @pytest.mark.asyncio
+    async def test_pre_first_chunk_non_retryable_raised_immediately(self) -> None:
+        """Asserts that a non-retryable pre-first-chunk error is re-raised without retry."""
+        err = ProviderError("bad request", 400)
+        provider = _PreFirstChunkFailProvider(errors=[err])
+        middleware = RetryMiddleware(client=provider, max_retries=3)
+
+        with pytest.raises(ProviderError) as exc_info:
+            async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+
+        assert exc_info.value is err
+        assert provider.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_pre_first_chunk_exhaustion_raises_retry_exhausted_error(self) -> None:
+        """Asserts that RetryExhaustedError is raised when pre-first-chunk retries are consumed."""
+        provider = _PreFirstChunkFailProvider(errors=[ProviderError("err", 500)] * 4)
+        with patch("mada_modelkit.middleware.retry.asyncio.sleep", new_callable=AsyncMock):
+            middleware = RetryMiddleware(client=provider, max_retries=3)
+            with pytest.raises(RetryExhaustedError):
+                async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
+                    pass
+
+        assert provider.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_pre_first_chunk_exhaustion_stores_last_error(self) -> None:
+        """Asserts that RetryExhaustedError.last_error is the final pre-first-chunk exception."""
+        last = ProviderError("last", 503)
+        provider = _PreFirstChunkFailProvider(
+            errors=[ProviderError("first", 500), ProviderError("second", 502), last]
+        )
+        with patch("mada_modelkit.middleware.retry.asyncio.sleep", new_callable=AsyncMock):
+            middleware = RetryMiddleware(client=provider, max_retries=2)
+            with pytest.raises(RetryExhaustedError) as exc_info:
+                async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
+                    pass
+
+        assert exc_info.value.last_error is last
+
+    @pytest.mark.asyncio
+    async def test_post_first_chunk_failure_propagates_without_retry(self) -> None:
+        """Asserts that a failure after the first chunk is propagated, not retried."""
+        first = StreamChunk(delta="hello")
+        err = ProviderError("mid-stream failure", 500)
+        provider = _PostFirstChunkFailProvider(first_chunk=first, error=err)
+        middleware = RetryMiddleware(client=provider, max_retries=3)
+
+        received = []
+        with pytest.raises(ProviderError) as exc_info:
+            async for chunk in middleware.send_request_stream(AgentRequest(prompt="hi")):
+                received.append(chunk)
+
+        assert received == [first]
+        assert exc_info.value is err
+        assert provider.call_count == 1  # no retry after first chunk
+
+    @pytest.mark.asyncio
+    async def test_pre_first_chunk_backoff_sleep_timing(self) -> None:
+        """Asserts that backoff sleeps are called with correct delays for stream retries."""
+        provider = _PreFirstChunkFailProvider(errors=[ProviderError("err", 500)] * 4)
+        mock_sleep = AsyncMock()
+        with patch("mada_modelkit.middleware.retry.asyncio.sleep", mock_sleep):
+            middleware = RetryMiddleware(client=provider, max_retries=3, backoff_base=1.0)
+            with pytest.raises(RetryExhaustedError):
+                async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
+                    pass
+
+        assert mock_sleep.call_count == 3
+        calls = [c.args[0] for c in mock_sleep.call_args_list]
+        assert calls == [1.0, 2.0, 4.0]
