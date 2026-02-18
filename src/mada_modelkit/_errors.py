@@ -19,3 +19,7 @@ class ProviderError(AgentError):
         """Store the error message and optional HTTP status code."""
         super().__init__(message)
         self.status_code = status_code
+
+
+class MiddlewareError(AgentError):
+    """Base class for errors raised by middleware layers."""

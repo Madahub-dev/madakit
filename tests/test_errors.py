@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._errors import AgentError, ProviderError
+from mada_modelkit._errors import AgentError, MiddlewareError, ProviderError
 
 
 class TestAgentError:
@@ -86,3 +86,34 @@ class TestProviderError:
         """ProviderError is caught by a bare Exception handler."""
         with pytest.raises(Exception):
             raise ProviderError("upstream failed")
+
+
+class TestMiddlewareError:
+    """Tests for the MiddlewareError base exception."""
+
+    def test_is_agent_error(self) -> None:
+        """MiddlewareError is a subclass of AgentError."""
+        assert issubclass(MiddlewareError, AgentError)
+
+    def test_is_exception(self) -> None:
+        """MiddlewareError is a subclass of Exception."""
+        assert issubclass(MiddlewareError, Exception)
+
+    def test_message_preserved(self) -> None:
+        """The error message is accessible via str()."""
+        err = MiddlewareError("middleware failed")
+        assert str(err) == "middleware failed"
+
+    def test_can_be_raised(self) -> None:
+        """MiddlewareError can be raised and caught directly."""
+        with pytest.raises(MiddlewareError):
+            raise MiddlewareError("oops")
+
+    def test_caught_as_agent_error(self) -> None:
+        """MiddlewareError is caught by an AgentError handler."""
+        with pytest.raises(AgentError):
+            raise MiddlewareError("caught upstream")
+
+    def test_not_a_provider_error(self) -> None:
+        """MiddlewareError is not a subclass of ProviderError."""
+        assert not issubclass(MiddlewareError, ProviderError)
