@@ -104,6 +104,28 @@ class CircuitBreakerMiddleware(BaseAgentClient):
             raise
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
-        """Delegate streaming to the wrapped client (circuit logic added in task 2.2.4)."""
-        async for chunk in self._client.send_request_stream(request):
-            yield chunk
+        """Stream response chunks with circuit breaker protection.
+
+        Applies the same closed/open/half-open logic as send_request. Success is
+        recorded when the stream exhausts normally; any exception records a failure
+        and re-raises. If the consumer abandons the stream early (aclose), neither
+        success nor failure is recorded.
+        """
+        state = await self._check_state()
+
+        if state == "open":
+            raise CircuitOpenError("Circuit breaker is open")
+
+        if state == "half-open":
+            healthy = await self._client.health_check()
+            if not healthy:
+                await self._record_failure()
+                raise CircuitOpenError("Circuit breaker reopened: health check failed")
+
+        try:
+            async for chunk in self._client.send_request_stream(request):
+                yield chunk
+            await self._record_success()
+        except Exception:
+            await self._record_failure()
+            raise

@@ -1,12 +1,13 @@
-"""Tests for CircuitBreakerMiddleware constructor, state machine, and send_request
-(tasks 2.2.1–2.2.3).
+"""Tests for CircuitBreakerMiddleware constructor, state machine, send_request,
+and send_request_stream (tasks 2.2.1–2.2.4).
 
 Covers: attribute storage, default values, initial state fields
 (_failure_count, _state, _last_failure_time, _lock), BaseAgentClient
 inheritance, semaphore absence, state machine transitions (closed→open at
 threshold, open→half-open after timeout, half-open→closed on success,
-half-open→open on failure), and send_request circuit logic (closed passthrough,
-open raises CircuitOpenError, half-open health-check probe then request).
+half-open→open on failure), send_request circuit logic (closed passthrough,
+open raises CircuitOpenError, half-open health-check probe then request),
+and send_request_stream with the same closed/open/half-open circuit logic.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import pytest
 from helpers import MockProvider
 from mada_modelkit._base import BaseAgentClient
 from mada_modelkit._errors import CircuitOpenError, ProviderError
-from mada_modelkit._types import AgentRequest, AgentResponse
+from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
 from mada_modelkit.middleware.circuit_breaker import CircuitBreakerMiddleware
 
 
@@ -376,4 +377,161 @@ class TestSendRequest:
         cb._state = "open"
         cb._last_failure_time = time.monotonic() - 11.0  # timeout elapsed
         await cb.send_request(AgentRequest(prompt="hi"))
+        assert cb._state == "closed"
+
+
+# ---------------------------------------------------------------------------
+# Streaming helper
+# ---------------------------------------------------------------------------
+
+
+class _ErrorAfterFirstChunkProvider(MockProvider):
+    """Yields one chunk then raises to simulate a mid-stream failure."""
+
+    def __init__(self, error: Exception) -> None:
+        """Initialise with the error to raise after the first chunk."""
+        super().__init__()
+        self._error = error
+
+    async def send_request_stream(self, request: AgentRequest):  # type: ignore[override]
+        """Yield one chunk then raise the stored error."""
+        self.call_count += 1
+        yield StreamChunk(delta="first", is_final=False)
+        raise self._error
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestSendRequestStream:
+    """CircuitBreakerMiddleware.send_request_stream — same circuit logic as send_request."""
+
+    @pytest.mark.asyncio
+    async def test_closed_streams_all_chunks(self) -> None:
+        """Asserts that send_request_stream yields all chunks through in closed state."""
+        cb = CircuitBreakerMiddleware(client=MockProvider())
+        chunks = []
+        async for chunk in cb.send_request_stream(AgentRequest(prompt="hi")):
+            chunks.append(chunk)
+        assert len(chunks) == 1
+        assert chunks[0].delta == "mock"
+
+    @pytest.mark.asyncio
+    async def test_closed_success_records_success(self) -> None:
+        """Asserts that a completed stream in closed state keeps the circuit closed."""
+        cb = CircuitBreakerMiddleware(client=MockProvider())
+        cb._failure_count = 3
+        async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+            pass
+        assert cb._state == "closed"
+        assert cb._failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_closed_stream_error_records_failure(self) -> None:
+        """Asserts that a stream error in closed state increments _failure_count."""
+        cb = CircuitBreakerMiddleware(
+            client=MockProvider(errors=[ProviderError("err", 500)]), failure_threshold=5
+        )
+        with pytest.raises(ProviderError):
+            async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+        assert cb._failure_count == 1
+
+    @pytest.mark.asyncio
+    async def test_closed_stream_errors_at_threshold_open_circuit(self) -> None:
+        """Asserts that stream failures at threshold open the circuit."""
+        errors = [ProviderError("err", 500)] * 3
+        cb = CircuitBreakerMiddleware(client=MockProvider(errors=errors), failure_threshold=3)
+        for _ in range(3):
+            with pytest.raises(ProviderError):
+                async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+                    pass
+        assert cb._state == "open"
+
+    @pytest.mark.asyncio
+    async def test_open_raises_circuit_open_error(self) -> None:
+        """Asserts that send_request_stream raises CircuitOpenError when circuit is open."""
+        cb = CircuitBreakerMiddleware(client=MockProvider())
+        cb._state = "open"
+        cb._last_failure_time = time.monotonic()
+        with pytest.raises(CircuitOpenError):
+            async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_open_does_not_call_client(self) -> None:
+        """Asserts that the wrapped client is never called when the circuit is open."""
+        provider = MockProvider()
+        cb = CircuitBreakerMiddleware(client=provider)
+        cb._state = "open"
+        cb._last_failure_time = time.monotonic()
+        with pytest.raises(CircuitOpenError):
+            async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+        assert provider.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_half_open_healthy_stream_success_closes_circuit(self) -> None:
+        """Asserts that a completed stream in half-open (healthy probe) closes the circuit."""
+        cb = CircuitBreakerMiddleware(client=MockProvider())
+        cb._state = "half-open"
+        async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+            pass
+        assert cb._state == "closed"
+
+    @pytest.mark.asyncio
+    async def test_half_open_healthy_stream_failure_reopens_circuit(self) -> None:
+        """Asserts that a stream error in half-open (healthy probe) reopens the circuit."""
+        cb = CircuitBreakerMiddleware(
+            client=MockProvider(errors=[ProviderError("err", 500)]), failure_threshold=10
+        )
+        cb._state = "half-open"
+        with pytest.raises(ProviderError):
+            async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+        assert cb._state == "open"
+
+    @pytest.mark.asyncio
+    async def test_half_open_unhealthy_probe_raises_circuit_open_error(self) -> None:
+        """Asserts that an unhealthy probe in half-open raises CircuitOpenError."""
+        cb = CircuitBreakerMiddleware(client=_UnhealthyProvider())
+        cb._state = "half-open"
+        with pytest.raises(CircuitOpenError):
+            async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_half_open_unhealthy_probe_reopens_circuit(self) -> None:
+        """Asserts that an unhealthy probe in half-open transitions state back to open."""
+        cb = CircuitBreakerMiddleware(client=_UnhealthyProvider(), failure_threshold=10)
+        cb._state = "half-open"
+        with pytest.raises(CircuitOpenError):
+            async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+        assert cb._state == "open"
+
+    @pytest.mark.asyncio
+    async def test_mid_stream_error_records_failure(self) -> None:
+        """Asserts that an error raised after the first chunk records a failure."""
+        err = ProviderError("mid-stream", 500)
+        cb = CircuitBreakerMiddleware(
+            client=_ErrorAfterFirstChunkProvider(error=err), failure_threshold=10
+        )
+        chunks = []
+        with pytest.raises(ProviderError):
+            async for chunk in cb.send_request_stream(AgentRequest(prompt="hi")):
+                chunks.append(chunk)
+        assert len(chunks) == 1  # first chunk received before error
+        assert cb._failure_count == 1
+
+    @pytest.mark.asyncio
+    async def test_open_to_half_open_to_closed_via_timeout_stream(self) -> None:
+        """Asserts full open→half-open→closed transition via timeout and stream success."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), recovery_timeout=10.0)
+        cb._state = "open"
+        cb._last_failure_time = time.monotonic() - 11.0
+        async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+            pass
         assert cb._state == "closed"
