@@ -1,11 +1,15 @@
-"""Tests for CachingMiddleware constructor and default cache key function (tasks 2.3.1–2.3.2).
+"""Tests for CachingMiddleware constructor, default key function, and send_request
+(tasks 2.3.1–2.3.3).
 
 Covers: client storage, default parameter values (ttl, max_entries, key_fn),
 custom parameter storage, initial state of _cache and _in_flight (both empty
 dicts), BaseAgentClient inheritance, semaphore absence, per-instance isolation,
-stub delegation to the wrapped client, middleware composition, and
+stub delegation to the wrapped client, middleware composition,
 _default_key_fn (determinism, field sensitivity, SHA-256 hex output, stop list
-conversion, callable as a static method).
+conversion, callable as a static method), and send_request (cache miss delegates
+to client, cache hit returns stored response without calling client, response
+stored with timestamp, custom key_fn used when provided, exception from client
+propagates without populating cache, per-key lock created in _in_flight).
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ import pytest
 
 from helpers import MockProvider
 from mada_modelkit._base import BaseAgentClient
+from mada_modelkit._errors import ProviderError
 from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
 from mada_modelkit.middleware.cache import CachingMiddleware
 
@@ -211,3 +216,121 @@ class TestDefaultKeyFn:
         req1 = AgentRequest(prompt="hi", metadata={"x": 1})
         req2 = AgentRequest(prompt="hi", metadata={"y": 2})
         assert CachingMiddleware._default_key_fn(req1) == CachingMiddleware._default_key_fn(req2)
+
+
+class TestSendRequest:
+    """CachingMiddleware.send_request — cache hit/miss, key function, and locking."""
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_calls_client(self) -> None:
+        """Asserts that a cache miss delegates to the wrapped client."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider)
+        await cm.send_request(AgentRequest(prompt="hi"))
+        assert provider.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_returns_cached_response(self) -> None:
+        """Asserts that a cache hit returns the same response object as the first request."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider)
+        req = AgentRequest(prompt="hi")
+        first = await cm.send_request(req)
+        second = await cm.send_request(req)
+        assert second is first
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_does_not_call_client_again(self) -> None:
+        """Asserts that a cache hit skips the wrapped client entirely."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider)
+        req = AgentRequest(prompt="hi")
+        await cm.send_request(req)
+        await cm.send_request(req)
+        assert provider.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_response_stored_in_cache_after_first_request(self) -> None:
+        """Asserts that _cache is populated with the response after a cache miss."""
+        cm = CachingMiddleware(client=MockProvider())
+        req = AgentRequest(prompt="hi")
+        response = await cm.send_request(req)
+        key = CachingMiddleware._default_key_fn(req)
+        assert key in cm._cache
+        assert cm._cache[key][0] is response
+
+    @pytest.mark.asyncio
+    async def test_cache_stores_response_with_timestamp(self) -> None:
+        """Asserts that the cache entry includes a float timestamp alongside the response."""
+        cm = CachingMiddleware(client=MockProvider())
+        await cm.send_request(AgentRequest(prompt="hi"))
+        key = CachingMiddleware._default_key_fn(AgentRequest(prompt="hi"))
+        _, stored_at = cm._cache[key]
+        assert isinstance(stored_at, float)
+        assert stored_at > 0.0
+
+    @pytest.mark.asyncio
+    async def test_custom_key_fn_is_used_when_provided(self) -> None:
+        """Asserts that a custom key_fn is called instead of _default_key_fn."""
+        called_with: list[AgentRequest] = []
+
+        def my_key_fn(req: AgentRequest) -> str:
+            """Record the call and return a fixed key."""
+            called_with.append(req)
+            return "fixed-key"
+
+        cm = CachingMiddleware(client=MockProvider(), key_fn=my_key_fn)
+        req = AgentRequest(prompt="hi")
+        await cm.send_request(req)
+        assert len(called_with) == 1
+        assert called_with[0] is req
+
+    @pytest.mark.asyncio
+    async def test_custom_key_fn_result_used_for_cache_lookup(self) -> None:
+        """Asserts that the cache key produced by a custom key_fn is used for storage."""
+        cm = CachingMiddleware(client=MockProvider(), key_fn=lambda _: "my-key")
+        await cm.send_request(AgentRequest(prompt="hi"))
+        assert "my-key" in cm._cache
+
+    @pytest.mark.asyncio
+    async def test_different_requests_use_separate_cache_entries(self) -> None:
+        """Asserts that two distinct requests each get their own cache entry."""
+        cm = CachingMiddleware(client=MockProvider())
+        await cm.send_request(AgentRequest(prompt="alpha"))
+        await cm.send_request(AgentRequest(prompt="beta"))
+        assert len(cm._cache) == 2
+
+    @pytest.mark.asyncio
+    async def test_exception_from_client_propagates(self) -> None:
+        """Asserts that an exception raised by the wrapped client propagates to the caller."""
+        cm = CachingMiddleware(client=MockProvider(errors=[ProviderError("err", 500)]))
+        with pytest.raises(ProviderError):
+            await cm.send_request(AgentRequest(prompt="hi"))
+
+    @pytest.mark.asyncio
+    async def test_exception_from_client_does_not_populate_cache(self) -> None:
+        """Asserts that a failed request leaves _cache empty."""
+        cm = CachingMiddleware(client=MockProvider(errors=[ProviderError("err", 500)]))
+        with pytest.raises(ProviderError):
+            await cm.send_request(AgentRequest(prompt="hi"))
+        assert len(cm._cache) == 0
+
+    @pytest.mark.asyncio
+    async def test_per_key_lock_created_in_in_flight(self) -> None:
+        """Asserts that a per-key asyncio.Lock is stored in _in_flight after a cache miss."""
+        cm = CachingMiddleware(client=MockProvider())
+        req = AgentRequest(prompt="hi")
+        await cm.send_request(req)
+        key = CachingMiddleware._default_key_fn(req)
+        assert key in cm._in_flight
+        assert isinstance(cm._in_flight[key], asyncio.Lock)
+
+    @pytest.mark.asyncio
+    async def test_sequential_identical_requests_call_client_once(self) -> None:
+        """Asserts that sequential requests with the same key only call the client once."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider)
+        req = AgentRequest(prompt="same")
+        for _ in range(5):
+            await cm.send_request(req)
+        assert provider.call_count == 1

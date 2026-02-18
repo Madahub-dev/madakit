@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from collections.abc import Callable
 from typing import AsyncIterator
 
@@ -65,8 +66,32 @@ class CachingMiddleware(BaseAgentClient):
         return hashlib.sha256(key_data.encode()).hexdigest()
 
     async def send_request(self, request: AgentRequest) -> AgentResponse:
-        """Delegate to wrapped client (stub; full cache logic added in task 2.3.3)."""
-        return await self._client.send_request(request)
+        """Execute request with caching.
+
+        Fast path: if the key is already in _cache, return the stored response
+        immediately without calling the wrapped client.
+
+        Slow path: acquire the per-key asyncio.Lock from _in_flight (creating it if
+        necessary), re-check the cache in case a concurrent request just populated it,
+        call the wrapped client, store the result, and return. Exceptions from the
+        client propagate without populating the cache.
+        """
+        key_fn = self._key_fn if self._key_fn is not None else self._default_key_fn
+        key = key_fn(request)
+
+        # Fast path: cache hit
+        if key in self._cache:
+            return self._cache[key][0]
+
+        # Slow path: per-key lock + double-checked locking
+        if key not in self._in_flight:
+            self._in_flight[key] = asyncio.Lock()
+        async with self._in_flight[key]:
+            if key in self._cache:  # re-check after acquiring lock
+                return self._cache[key][0]
+            response = await self._client.send_request(request)
+            self._cache[key] = (response, time.monotonic())
+            return response
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
         """Delegate to wrapped client (stub; full stream-through logic added in task 2.3.6)."""
