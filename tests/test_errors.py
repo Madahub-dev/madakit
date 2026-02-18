@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._errors import AgentError
+from mada_modelkit._errors import AgentError, ProviderError
 
 
 class TestAgentError:
@@ -39,3 +39,50 @@ class TestAgentError:
         """AgentError can be raised with no message."""
         err = AgentError()
         assert str(err) == ""
+
+
+class TestProviderError:
+    """Tests for the ProviderError exception."""
+
+    def test_is_agent_error(self) -> None:
+        """ProviderError is a subclass of AgentError."""
+        assert issubclass(ProviderError, AgentError)
+
+    def test_is_exception(self) -> None:
+        """ProviderError is a subclass of Exception."""
+        assert issubclass(ProviderError, Exception)
+
+    def test_message_preserved(self) -> None:
+        """The error message is accessible via str()."""
+        err = ProviderError("rate limited")
+        assert str(err) == "rate limited"
+
+    def test_status_code_default_none(self) -> None:
+        """status_code defaults to None when not provided."""
+        err = ProviderError("network error")
+        assert err.status_code is None
+
+    def test_status_code_stored(self) -> None:
+        """status_code is stored when explicitly provided."""
+        err = ProviderError("not found", status_code=404)
+        assert err.status_code == 404
+
+    def test_status_code_500(self) -> None:
+        """status_code stores server-error codes correctly."""
+        err = ProviderError("internal server error", status_code=500)
+        assert err.status_code == 500
+
+    def test_status_code_429(self) -> None:
+        """status_code stores rate-limit code correctly."""
+        err = ProviderError("too many requests", status_code=429)
+        assert err.status_code == 429
+
+    def test_caught_as_agent_error(self) -> None:
+        """ProviderError is caught by an AgentError handler."""
+        with pytest.raises(AgentError):
+            raise ProviderError("upstream failed", status_code=503)
+
+    def test_caught_as_exception(self) -> None:
+        """ProviderError is caught by a bare Exception handler."""
+        with pytest.raises(Exception):
+            raise ProviderError("upstream failed")
