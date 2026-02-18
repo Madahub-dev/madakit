@@ -109,6 +109,46 @@ class CachingMiddleware(BaseAgentClient):
             return response
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
-        """Delegate to wrapped client (stub; full stream-through logic added in task 2.3.6)."""
-        async for chunk in self._client.send_request_stream(request):
-            yield chunk
+        """Stream response chunks with caching and TTL validation.
+
+        Fast path: if the key is in _cache and the entry has not expired, yield the
+        cached content as a single StreamChunk(delta=content, is_final=True) without
+        calling the wrapped client.
+
+        Slow path: stream chunks through to the consumer immediately while accumulating
+        delta values in a buffer. When the chunk with is_final=True arrives the buffer
+        is joined, LRU eviction is applied if _cache is at capacity, and the response
+        is written to _cache with the current timestamp. Any exception discards the
+        buffer and re-raises without populating the cache. Streams that end without an
+        is_final=True chunk are never cached.
+        """
+        key_fn = self._key_fn if self._key_fn is not None else self._default_key_fn
+        key = key_fn(request)
+
+        # Fast path: cache hit with TTL check
+        if key in self._cache:
+            response, stored_at = self._cache[key]
+            if time.monotonic() - stored_at < self._ttl:
+                self._cache.move_to_end(key)  # type: ignore[attr-defined]
+                yield StreamChunk(delta=response.content, is_final=True)
+                return
+            del self._cache[key]  # TTL expired; fall through to slow path
+
+        # Slow path: stream-through with deferred cache write on is_final
+        buffer: list[str] = []
+        try:
+            async for chunk in self._client.send_request_stream(request):
+                buffer.append(chunk.delta)
+                yield chunk
+                if chunk.is_final:
+                    content = "".join(buffer)
+                    if len(self._cache) >= self._max_entries:
+                        self._cache.popitem(last=False)  # type: ignore[attr-defined]
+                    self._cache[key] = (
+                        AgentResponse(
+                            content=content, model="", input_tokens=0, output_tokens=0
+                        ),
+                        time.monotonic(),
+                    )
+        except Exception:
+            raise  # buffer discarded; do not cache

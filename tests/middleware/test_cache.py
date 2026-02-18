@@ -1,5 +1,4 @@
-"""Tests for CachingMiddleware constructor, default key function, send_request,
-TTL validation, LRU eviction, and request coalescing (tasks 2.3.1–2.3.5).
+"""Tests for CachingMiddleware — constructor through send_request_stream (tasks 2.3.1–2.3.6).
 
 Covers: client storage, default parameter values (ttl, max_entries, key_fn),
 custom parameter storage, initial state of _cache and _in_flight (both empty
@@ -13,8 +12,11 @@ propagates without populating cache, per-key lock created in _in_flight),
 TTL (expired entries trigger re-fetch, valid entries served from cache, boundary
 at exact TTL is treated as expired, refresh on re-fetch), LRU eviction (oldest
 entry removed at capacity, access order updated on hit, cache never exceeds
-max_entries), and request coalescing (concurrent identical requests call client
-once, all callers receive the same response, different keys are independent).
+max_entries), request coalescing (concurrent identical requests call client
+once, all callers receive the same response, different keys are independent), and
+send_request_stream (stream-through on miss with deferred cache write on
+is_final, cached content replayed as single chunk on hit, incomplete streams and
+failures not cached, TTL respected on stream hits).
 """
 
 from __future__ import annotations
@@ -542,3 +544,149 @@ class TestRequestCoalescing:
         assert len(locks) == 3
         # All locks are distinct objects
         assert len({id(lk) for lk in locks}) == 3
+
+
+# ---------------------------------------------------------------------------
+# Streaming helpers
+# ---------------------------------------------------------------------------
+
+
+class _MultiChunkProvider(MockProvider):
+    """Yields two delta chunks followed by a final chunk to test buffer accumulation."""
+
+    async def send_request_stream(self, request: AgentRequest):  # type: ignore[override]
+        """Yield 'hello', ' world' (non-final), then '!' (final)."""
+        self.call_count += 1
+        yield StreamChunk(delta="hello", is_final=False)
+        yield StreamChunk(delta=" world", is_final=False)
+        yield StreamChunk(delta="!", is_final=True)
+
+
+class _NoFinalChunkProvider(MockProvider):
+    """Yields a single non-final chunk without ever sending is_final=True."""
+
+    async def send_request_stream(self, request: AgentRequest):  # type: ignore[override]
+        """Yield one non-final chunk and return without is_final."""
+        self.call_count += 1
+        yield StreamChunk(delta="partial", is_final=False)
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestSendRequestStream:
+    """CachingMiddleware.send_request_stream — stream-through, deferred write, and cache hit."""
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_streams_all_chunks_to_consumer(self) -> None:
+        """Asserts that all chunks from the wrapped client reach the consumer on a miss."""
+        cm = CachingMiddleware(client=_MultiChunkProvider())
+        chunks = []
+        async for chunk in cm.send_request_stream(AgentRequest(prompt="hi")):
+            chunks.append(chunk)
+        assert len(chunks) == 3
+
+    @pytest.mark.asyncio
+    async def test_is_final_chunk_writes_buffer_to_cache(self) -> None:
+        """Asserts that _cache is populated after a stream completes with is_final=True."""
+        cm = CachingMiddleware(client=MockProvider())
+        req = AgentRequest(prompt="hi")
+        async for _ in cm.send_request_stream(req):
+            pass
+        key = CachingMiddleware._default_key_fn(req)
+        assert key in cm._cache
+
+    @pytest.mark.asyncio
+    async def test_cached_content_is_joined_deltas(self) -> None:
+        """Asserts that the cached content is the concatenation of all yielded deltas."""
+        cm = CachingMiddleware(client=_MultiChunkProvider())
+        req = AgentRequest(prompt="hi")
+        async for _ in cm.send_request_stream(req):
+            pass
+        key = CachingMiddleware._default_key_fn(req)
+        cached_response, _ = cm._cache[key]
+        assert cached_response.content == "hello world!"
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_yields_single_final_chunk(self) -> None:
+        """Asserts that a cache hit yields exactly one StreamChunk with is_final=True."""
+        cm = CachingMiddleware(client=MockProvider())
+        req = AgentRequest(prompt="hi")
+        async for _ in cm.send_request_stream(req):
+            pass  # populate cache
+        chunks = []
+        async for chunk in cm.send_request_stream(req):
+            chunks.append(chunk)
+        assert len(chunks) == 1
+        assert chunks[0].is_final is True
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_yields_correct_content(self) -> None:
+        """Asserts that the chunk yielded on a cache hit contains the cached delta content."""
+        cm = CachingMiddleware(client=_MultiChunkProvider())
+        req = AgentRequest(prompt="hi")
+        async for _ in cm.send_request_stream(req):
+            pass
+        chunks = []
+        async for chunk in cm.send_request_stream(req):
+            chunks.append(chunk)
+        assert chunks[0].delta == "hello world!"
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_does_not_call_client(self) -> None:
+        """Asserts that the wrapped client is not called when serving a stream from cache."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider)
+        req = AgentRequest(prompt="hi")
+        async for _ in cm.send_request_stream(req):
+            pass
+        assert provider.call_count == 1
+        async for _ in cm.send_request_stream(req):
+            pass
+        assert provider.call_count == 1  # no second call
+
+    @pytest.mark.asyncio
+    async def test_exception_does_not_populate_cache(self) -> None:
+        """Asserts that a streaming failure leaves _cache empty."""
+        cm = CachingMiddleware(client=MockProvider(errors=[ProviderError("err", 500)]))
+        with pytest.raises(ProviderError):
+            async for _ in cm.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+        assert len(cm._cache) == 0
+
+    @pytest.mark.asyncio
+    async def test_no_is_final_chunk_does_not_cache(self) -> None:
+        """Asserts that a stream that ends without is_final=True is not cached."""
+        cm = CachingMiddleware(client=_NoFinalChunkProvider())
+        req = AgentRequest(prompt="hi")
+        async for _ in cm.send_request_stream(req):
+            pass
+        assert len(cm._cache) == 0
+
+    @pytest.mark.asyncio
+    async def test_stream_cache_entry_has_timestamp(self) -> None:
+        """Asserts that the stream cache entry includes a positive float timestamp."""
+        cm = CachingMiddleware(client=MockProvider())
+        req = AgentRequest(prompt="hi")
+        async for _ in cm.send_request_stream(req):
+            pass
+        key = CachingMiddleware._default_key_fn(req)
+        _, stored_at = cm._cache[key]
+        assert isinstance(stored_at, float)
+        assert stored_at > 0.0
+
+    @pytest.mark.asyncio
+    async def test_ttl_expired_stream_hit_calls_client_again(self) -> None:
+        """Asserts that an expired stream cache entry causes the client to be called again."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider, ttl=10.0)
+        req = AgentRequest(prompt="hi")
+        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=100.0):
+            async for _ in cm.send_request_stream(req):
+                pass
+        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=111.0):
+            async for _ in cm.send_request_stream(req):
+                pass
+        assert provider.call_count == 2
