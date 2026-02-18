@@ -8,7 +8,7 @@ with sensible defaults. No external dependencies — stdlib only.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
 
@@ -25,3 +25,12 @@ class BaseAgentClient(ABC):
         """Stream response chunks. Default: call send_request, yield single final chunk."""
         response = await self.send_request(request)
         yield StreamChunk(delta=response.content, is_final=True)
+
+    async def generate(self, prompt: str, **kwargs: Any) -> AgentResponse:
+        """Convenience: build AgentRequest from prompt and kwargs, call send_request."""
+        return await self.send_request(AgentRequest(prompt=prompt, **kwargs))
+
+    async def generate_stream(self, prompt: str, **kwargs: Any) -> AsyncIterator[StreamChunk]:
+        """Convenience: build AgentRequest from prompt and kwargs, call send_request_stream."""
+        async for chunk in self.send_request_stream(AgentRequest(prompt=prompt, **kwargs)):
+            yield chunk

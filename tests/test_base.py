@@ -137,3 +137,105 @@ class TestSendRequestStreamDefault:
         assert len(call_log) == 1
         assert call_log[0] is request
         assert chunks[0].delta == "tracked"
+
+
+class TestGenerate:
+    """Tests for the generate convenience method."""
+
+    @pytest.mark.asyncio
+    async def test_returns_agent_response(self) -> None:
+        """generate returns an AgentResponse."""
+        client = _ConcreteClient()
+        response = await client.generate("hello")
+        assert isinstance(response, AgentResponse)
+
+    @pytest.mark.asyncio
+    async def test_prompt_passed_through(self) -> None:
+        """generate forwards the prompt to send_request via AgentRequest."""
+        received: list[AgentRequest] = []
+
+        class _CaptureClient(BaseAgentClient):
+            async def send_request(self, request: AgentRequest) -> AgentResponse:
+                """Capture the request and return a fixed response."""
+                received.append(request)
+                return AgentResponse(content="x", model="m", input_tokens=1, output_tokens=1)
+
+        await _CaptureClient().generate("my prompt")
+        assert received[0].prompt == "my prompt"
+
+    @pytest.mark.asyncio
+    async def test_kwargs_forwarded_to_agent_request(self) -> None:
+        """generate passes extra kwargs as AgentRequest fields."""
+        received: list[AgentRequest] = []
+
+        class _CaptureClient(BaseAgentClient):
+            async def send_request(self, request: AgentRequest) -> AgentResponse:
+                """Capture the request and return a fixed response."""
+                received.append(request)
+                return AgentResponse(content="x", model="m", input_tokens=1, output_tokens=1)
+
+        await _CaptureClient().generate("p", max_tokens=256, temperature=0.1)
+        assert received[0].max_tokens == 256
+        assert received[0].temperature == 0.1
+
+    @pytest.mark.asyncio
+    async def test_delegates_to_send_request(self) -> None:
+        """generate calls send_request exactly once."""
+        call_count = 0
+
+        class _CountingClient(BaseAgentClient):
+            async def send_request(self, request: AgentRequest) -> AgentResponse:
+                """Count invocations and return a fixed response."""
+                nonlocal call_count
+                call_count += 1
+                return AgentResponse(content="y", model="m", input_tokens=1, output_tokens=1)
+
+        await _CountingClient().generate("ping")
+        assert call_count == 1
+
+
+class TestGenerateStream:
+    """Tests for the generate_stream convenience method."""
+
+    @pytest.mark.asyncio
+    async def test_yields_stream_chunks(self) -> None:
+        """generate_stream yields StreamChunk instances."""
+        client = _ConcreteClient()
+        chunks = [c async for c in client.generate_stream("hello")]
+        assert all(isinstance(c, StreamChunk) for c in chunks)
+
+    @pytest.mark.asyncio
+    async def test_prompt_passed_through(self) -> None:
+        """generate_stream forwards the prompt to send_request_stream via AgentRequest."""
+        received: list[AgentRequest] = []
+
+        class _CaptureClient(BaseAgentClient):
+            async def send_request(self, request: AgentRequest) -> AgentResponse:
+                """Capture the request and return a fixed response."""
+                received.append(request)
+                return AgentResponse(content="z", model="m", input_tokens=1, output_tokens=1)
+
+        chunks = [c async for c in _CaptureClient().generate_stream("stream me")]
+        assert received[0].prompt == "stream me"
+        assert len(chunks) == 1
+
+    @pytest.mark.asyncio
+    async def test_kwargs_forwarded_to_agent_request(self) -> None:
+        """generate_stream passes extra kwargs as AgentRequest fields."""
+        received: list[AgentRequest] = []
+
+        class _CaptureClient(BaseAgentClient):
+            async def send_request(self, request: AgentRequest) -> AgentResponse:
+                """Capture the request and return a fixed response."""
+                received.append(request)
+                return AgentResponse(content="z", model="m", input_tokens=1, output_tokens=1)
+
+        _ = [c async for c in _CaptureClient().generate_stream("p", max_tokens=128)]
+        assert received[0].max_tokens == 128
+
+    @pytest.mark.asyncio
+    async def test_final_chunk_is_final(self) -> None:
+        """The last chunk from generate_stream has is_final=True (via default stream)."""
+        client = _ConcreteClient()
+        chunks = [c async for c in client.generate_stream("hi")]
+        assert chunks[-1].is_final is True
