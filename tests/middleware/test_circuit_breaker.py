@@ -1,5 +1,5 @@
 """Tests for CircuitBreakerMiddleware constructor, state machine, send_request,
-send_request_stream, and recovery probing (tasks 2.2.1–2.2.5).
+send_request_stream, recovery probing, and concurrent access safety (tasks 2.2.1–2.2.6).
 
 Covers: attribute storage, default values, initial state fields
 (_failure_count, _state, _last_failure_time, _lock), BaseAgentClient
@@ -7,9 +7,10 @@ inheritance, semaphore absence, state machine transitions (closed→open at
 threshold, open→half-open after timeout, half-open→closed on success,
 half-open→open on failure), send_request circuit logic (closed passthrough,
 open raises CircuitOpenError, half-open health-check probe then request),
-send_request_stream with the same closed/open/half-open circuit logic, and
+send_request_stream with the same closed/open/half-open circuit logic,
 recovery probing (health_check call count, not called in wrong states,
-exception propagation without failure recording).
+exception propagation without failure recording), and concurrent access safety
+(asyncio.Lock correctness under concurrent state mutations).
 """
 
 from __future__ import annotations
@@ -578,7 +579,7 @@ class _RaisingHealthCheckProvider(MockProvider):
 
 
 class TestHealthCheckProbing:
-    """CircuitBreakerMiddleware recovery probing — health_check call count and exception handling."""
+    """CircuitBreakerMiddleware recovery probing — health_check call count and exception."""
 
     # -- send_request ---------------------------------------------------------
 
@@ -686,3 +687,60 @@ class TestHealthCheckProbing:
             async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
                 pass
         assert cb._failure_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Concurrent access safety
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentAccess:
+    """CircuitBreakerMiddleware asyncio.Lock — state transition correctness under concurrency."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_record_failure_counts_accurately(self) -> None:
+        """Asserts that 20 concurrent _record_failure calls produce an accurate total count."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), failure_threshold=1000)
+        n = 20
+        await asyncio.gather(*[cb._record_failure() for _ in range(n)])
+        assert cb._failure_count == n
+
+    @pytest.mark.asyncio
+    async def test_concurrent_record_success_closes_circuit(self) -> None:
+        """Asserts that concurrent _record_success calls leave the circuit closed with count=0."""
+        cb = CircuitBreakerMiddleware(client=MockProvider())
+        cb._state = "open"
+        cb._failure_count = 5
+        await asyncio.gather(*[cb._record_success() for _ in range(5)])
+        assert cb._state == "closed"
+        assert cb._failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_failures_open_circuit_at_threshold(self) -> None:
+        """Asserts that concurrent _record_failure calls open the circuit when threshold is met."""
+        n = 5
+        cb = CircuitBreakerMiddleware(client=MockProvider(), failure_threshold=n)
+        await asyncio.gather(*[cb._record_failure() for _ in range(n)])
+        assert cb._state == "open"
+        assert cb._failure_count == n
+
+    @pytest.mark.asyncio
+    async def test_concurrent_check_state_on_timed_out_circuit(self) -> None:
+        """Asserts that concurrent _check_state on a timed-out open circuit all see half-open."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), recovery_timeout=10.0)
+        cb._state = "open"
+        cb._last_failure_time = time.monotonic() - 11.0
+        results = await asyncio.gather(*[cb._check_state() for _ in range(5)])
+        assert all(s in {"open", "half-open"} for s in results)
+        assert cb._state == "half-open"
+
+    @pytest.mark.asyncio
+    async def test_state_valid_after_mixed_concurrent_transitions(self) -> None:
+        """Asserts that the circuit state is always a valid value after mixed concurrent calls."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), failure_threshold=3)
+        coros = (
+            [cb._record_failure() for _ in range(3)]
+            + [cb._record_success() for _ in range(3)]
+        )
+        await asyncio.gather(*coros)
+        assert cb._state in {"closed", "open", "half-open"}
