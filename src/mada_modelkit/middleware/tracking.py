@@ -7,6 +7,7 @@ cost estimation. Zero external dependencies — stdlib only.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import AsyncIterator
 
@@ -37,8 +38,26 @@ class TrackingMiddleware(BaseAgentClient):
         self._stats: TrackingStats = TrackingStats()
 
     async def send_request(self, request: AgentRequest) -> AgentResponse:
-        """Delegate to wrapped client (stub; full tracking logic added in task 2.4.2)."""
-        return await self._client.send_request(request)
+        """Execute request and record wall-clock time, token usage, and optional cost.
+
+        Measures elapsed time via time.perf_counter, increments total_requests,
+        accumulates input/output tokens and inference_ms. If cost_fn is set, calls it
+        with the response and accumulates the result into total_cost_usd. Exceptions
+        from the wrapped client propagate without updating stats.
+        """
+        start = time.perf_counter()
+        response = await self._client.send_request(request)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        self._stats.total_requests += 1
+        self._stats.total_input_tokens += response.input_tokens
+        self._stats.total_output_tokens += response.output_tokens
+        self._stats.total_inference_ms += elapsed_ms
+        if self._cost_fn is not None:
+            cost = self._cost_fn(response)
+            if self._stats.total_cost_usd is None:
+                self._stats.total_cost_usd = 0.0
+            self._stats.total_cost_usd += cost
+        return response
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
         """Delegate to wrapped client (stub; full TTFT tracking added in task 2.4.3)."""

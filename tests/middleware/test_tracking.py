@@ -1,13 +1,16 @@
-"""Tests for TrackingMiddleware constructor (task 2.4.1).
+"""Tests for TrackingMiddleware constructor and send_request (tasks 2.4.1–2.4.2).
 
 Covers: client storage, default cost_fn (None), custom cost_fn storage,
 _stats initialised as a fresh TrackingStats instance (all counters at zero,
 total_cost_usd=None), BaseAgentClient inheritance, semaphore absence,
-per-instance stats isolation, stub delegation to the wrapped client, and
-middleware composition.
+per-instance stats isolation, stub delegation to the wrapped client,
+middleware composition, send_request timing via perf_counter, token
+accumulation, cost_fn invocation and accumulation, and exception safety.
 """
 
 from __future__ import annotations
+
+from unittest.mock import patch
 
 import pytest
 
@@ -132,3 +135,123 @@ class TestStubDelegation:
         middleware = TrackingMiddleware(client=provider)
         await middleware.send_request(AgentRequest(prompt="hi"))
         assert provider.call_count == 1
+
+
+class TestSendRequest:
+    """TrackingMiddleware.send_request — timing, token accumulation, and cost tracking."""
+
+    @pytest.mark.asyncio
+    async def test_increments_total_requests_by_one(self) -> None:
+        """Asserts that total_requests is 1 after a single send_request call."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert middleware._stats.total_requests == 1
+
+    @pytest.mark.asyncio
+    async def test_accumulates_total_requests_across_calls(self) -> None:
+        """Asserts that total_requests accumulates correctly over multiple calls."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        await middleware.send_request(AgentRequest(prompt="a"))
+        await middleware.send_request(AgentRequest(prompt="b"))
+        assert middleware._stats.total_requests == 2
+
+    @pytest.mark.asyncio
+    async def test_accumulates_input_tokens(self) -> None:
+        """Asserts that total_input_tokens sums input_tokens from all responses."""
+        resp1 = AgentResponse(content="r1", model="m", input_tokens=3, output_tokens=1)
+        resp2 = AgentResponse(content="r2", model="m", input_tokens=7, output_tokens=1)
+        middleware = TrackingMiddleware(client=MockProvider(responses=[resp1, resp2]))
+        await middleware.send_request(AgentRequest(prompt="a"))
+        await middleware.send_request(AgentRequest(prompt="b"))
+        assert middleware._stats.total_input_tokens == 10
+
+    @pytest.mark.asyncio
+    async def test_accumulates_output_tokens(self) -> None:
+        """Asserts that total_output_tokens sums output_tokens from all responses."""
+        resp1 = AgentResponse(content="r1", model="m", input_tokens=1, output_tokens=4)
+        resp2 = AgentResponse(content="r2", model="m", input_tokens=1, output_tokens=6)
+        middleware = TrackingMiddleware(client=MockProvider(responses=[resp1, resp2]))
+        await middleware.send_request(AgentRequest(prompt="a"))
+        await middleware.send_request(AgentRequest(prompt="b"))
+        assert middleware._stats.total_output_tokens == 10
+
+    @pytest.mark.asyncio
+    async def test_inference_ms_is_positive_after_call(self) -> None:
+        """Asserts that total_inference_ms is greater than zero after one call."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert middleware._stats.total_inference_ms > 0.0
+
+    @pytest.mark.asyncio
+    async def test_inference_ms_uses_perf_counter(self) -> None:
+        """Asserts that inference_ms is derived from time.perf_counter readings."""
+        side_effects = [1.0, 1.5]  # start=1.0, end=1.5 → 500 ms
+        middleware = TrackingMiddleware(client=MockProvider())
+        with patch("mada_modelkit.middleware.tracking.time.perf_counter", side_effect=side_effects):
+            await middleware.send_request(AgentRequest(prompt="hi"))
+        assert middleware._stats.total_inference_ms == pytest.approx(500.0)
+
+    @pytest.mark.asyncio
+    async def test_inference_ms_accumulates_across_calls(self) -> None:
+        """Asserts that total_inference_ms sums elapsed time across multiple calls."""
+        side_effects = [0.0, 0.1, 0.0, 0.2]  # 100 ms + 200 ms = 300 ms
+        middleware = TrackingMiddleware(client=MockProvider())
+        with patch("mada_modelkit.middleware.tracking.time.perf_counter", side_effect=side_effects):
+            await middleware.send_request(AgentRequest(prompt="a"))
+            await middleware.send_request(AgentRequest(prompt="b"))
+        assert middleware._stats.total_inference_ms == pytest.approx(300.0)
+
+    @pytest.mark.asyncio
+    async def test_no_cost_fn_leaves_cost_usd_none(self) -> None:
+        """Asserts that total_cost_usd remains None when cost_fn is not provided."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert middleware._stats.total_cost_usd is None
+
+    @pytest.mark.asyncio
+    async def test_cost_fn_called_with_response(self) -> None:
+        """Asserts that cost_fn receives the AgentResponse returned by the client."""
+        received: list[AgentResponse] = []
+        resp = AgentResponse(content="x", model="m", input_tokens=1, output_tokens=1)
+        middleware = TrackingMiddleware(
+            client=MockProvider(responses=[resp]),
+            cost_fn=lambda r: received.append(r) or 0.0,  # type: ignore[return-value]
+        )
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert len(received) == 1
+        assert received[0] is resp
+
+    @pytest.mark.asyncio
+    async def test_cost_fn_result_stored_in_total_cost_usd(self) -> None:
+        """Asserts that the cost_fn return value is stored in total_cost_usd."""
+        middleware = TrackingMiddleware(client=MockProvider(), cost_fn=lambda r: 0.05)
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert middleware._stats.total_cost_usd == pytest.approx(0.05)
+
+    @pytest.mark.asyncio
+    async def test_cost_fn_accumulates_across_calls(self) -> None:
+        """Asserts that total_cost_usd sums cost_fn results over multiple calls."""
+        middleware = TrackingMiddleware(client=MockProvider(), cost_fn=lambda r: 0.03)
+        await middleware.send_request(AgentRequest(prompt="a"))
+        await middleware.send_request(AgentRequest(prompt="b"))
+        assert middleware._stats.total_cost_usd == pytest.approx(0.06)
+
+    @pytest.mark.asyncio
+    async def test_exception_does_not_update_stats(self) -> None:
+        """Asserts that stats remain unchanged when the wrapped client raises."""
+        middleware = TrackingMiddleware(client=MockProvider(errors=[RuntimeError("boom")]))
+        with pytest.raises(RuntimeError):
+            await middleware.send_request(AgentRequest(prompt="hi"))
+        assert middleware._stats.total_requests == 0
+        assert middleware._stats.total_input_tokens == 0
+        assert middleware._stats.total_output_tokens == 0
+        assert middleware._stats.total_inference_ms == 0.0
+        assert middleware._stats.total_cost_usd is None
+
+    @pytest.mark.asyncio
+    async def test_returns_response_from_client(self) -> None:
+        """Asserts that send_request returns exactly the response from the wrapped client."""
+        expected = AgentResponse(content="z", model="m", input_tokens=2, output_tokens=3)
+        middleware = TrackingMiddleware(client=MockProvider(responses=[expected]))
+        result = await middleware.send_request(AgentRequest(prompt="hi"))
+        assert result is expected
