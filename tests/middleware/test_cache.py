@@ -1,4 +1,4 @@
-"""Tests for CachingMiddleware — constructor through send_request_stream (tasks 2.3.1–2.3.6).
+"""Tests for CachingMiddleware — comprehensive coverage (tasks 2.3.1–2.3.7).
 
 Covers: client storage, default parameter values (ttl, max_entries, key_fn),
 custom parameter storage, initial state of _cache and _in_flight (both empty
@@ -13,10 +13,13 @@ TTL (expired entries trigger re-fetch, valid entries served from cache, boundary
 at exact TTL is treated as expired, refresh on re-fetch), LRU eviction (oldest
 entry removed at capacity, access order updated on hit, cache never exceeds
 max_entries), request coalescing (concurrent identical requests call client
-once, all callers receive the same response, different keys are independent), and
+once, all callers receive the same response, different keys are independent),
 send_request_stream (stream-through on miss with deferred cache write on
 is_final, cached content replayed as single chunk on hit, incomplete streams and
-failures not cached, TTL respected on stream hits).
+failures not cached, TTL respected on stream hits), module exports (__all__),
+virtual method defaults (health_check, close, cancel), and end-to-end
+integration (cross-method cache sharing, stacked middleware, context manager,
+zero TTL).
 """
 
 from __future__ import annotations
@@ -689,4 +692,123 @@ class TestSendRequestStream:
         with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=111.0):
             async for _ in cm.send_request_stream(req):
                 pass
+        assert provider.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Module exports
+# ---------------------------------------------------------------------------
+
+
+class TestModuleExports:
+    """mada_modelkit.middleware.cache module — __all__ and importability."""
+
+    def test_all_contains_caching_middleware(self) -> None:
+        """Asserts that __all__ lists CachingMiddleware."""
+        from mada_modelkit.middleware import cache
+
+        assert "CachingMiddleware" in cache.__all__
+
+    def test_all_has_exactly_one_export(self) -> None:
+        """Asserts that __all__ exposes exactly one public name."""
+        from mada_modelkit.middleware import cache
+
+        assert len(cache.__all__) == 1
+
+    def test_caching_middleware_importable_from_module(self) -> None:
+        """Asserts that CachingMiddleware can be imported directly from the module."""
+        from mada_modelkit.middleware.cache import CachingMiddleware as CM
+
+        assert CM is CachingMiddleware
+
+
+# ---------------------------------------------------------------------------
+# Virtual method defaults
+# ---------------------------------------------------------------------------
+
+
+class TestVirtualMethodDefaults:
+    """CachingMiddleware virtual method defaults — health_check, close, cancel."""
+
+    @pytest.mark.asyncio
+    async def test_health_check_returns_true(self) -> None:
+        """Asserts that health_check returns True (inherited BaseAgentClient default)."""
+        cm = CachingMiddleware(client=MockProvider())
+        assert await cm.health_check() is True
+
+    @pytest.mark.asyncio
+    async def test_close_completes_without_error(self) -> None:
+        """Asserts that close() completes without raising."""
+        cm = CachingMiddleware(client=MockProvider())
+        await cm.close()
+
+    @pytest.mark.asyncio
+    async def test_cancel_completes_without_error(self) -> None:
+        """Asserts that cancel() completes without raising."""
+        cm = CachingMiddleware(client=MockProvider())
+        await cm.cancel()
+
+
+# ---------------------------------------------------------------------------
+# Integration
+# ---------------------------------------------------------------------------
+
+
+class TestIntegration:
+    """CachingMiddleware end-to-end — cross-method cache sharing and middleware composition."""
+
+    @pytest.mark.asyncio
+    async def test_send_request_populates_cache_for_stream_hit(self) -> None:
+        """Asserts that a send_request cache entry is served by send_request_stream."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider)
+        req = AgentRequest(prompt="shared")
+        response = await cm.send_request(req)
+        # Stream the same request — should hit the cache populated by send_request
+        chunks = []
+        async for chunk in cm.send_request_stream(req):
+            chunks.append(chunk)
+        assert provider.call_count == 1  # client called only once
+        assert len(chunks) == 1
+        assert chunks[0].delta == response.content
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_populates_cache_for_request_hit(self) -> None:
+        """Asserts that a send_request_stream cache entry is served by send_request."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider)
+        req = AgentRequest(prompt="shared")
+        async for _ in cm.send_request_stream(req):
+            pass
+        # send_request for same key — should hit the cache populated by the stream
+        result = await cm.send_request(req)
+        assert provider.call_count == 1  # client called only once
+        assert result.content == "mock"  # MockProvider default delta
+
+    @pytest.mark.asyncio
+    async def test_stacked_with_retry_middleware(self) -> None:
+        """Asserts CachingMiddleware correctly composes over RetryMiddleware."""
+        from mada_modelkit.middleware.retry import RetryMiddleware
+
+        inner = RetryMiddleware(client=MockProvider(), max_retries=0)
+        cm = CachingMiddleware(client=inner)
+        result = await cm.send_request(AgentRequest(prompt="hi"))
+        assert result.content == "mock"
+        assert len(cm._cache) == 1
+
+    @pytest.mark.asyncio
+    async def test_context_manager_completes_without_error(self) -> None:
+        """Asserts that CachingMiddleware works as an async context manager."""
+        async with CachingMiddleware(client=MockProvider()) as cm:
+            result = await cm.send_request(AgentRequest(prompt="hi"))
+        assert result.content == "mock"
+
+    @pytest.mark.asyncio
+    async def test_zero_ttl_never_serves_from_cache(self) -> None:
+        """Asserts that ttl=0.0 causes every request to call the client."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider, ttl=0.0)
+        req = AgentRequest(prompt="hi")
+        await cm.send_request(req)
+        await cm.send_request(req)
         assert provider.call_count == 2
