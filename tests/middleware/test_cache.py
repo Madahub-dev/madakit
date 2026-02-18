@@ -1,20 +1,25 @@
-"""Tests for CachingMiddleware constructor, default key function, and send_request
-(tasks 2.3.1–2.3.3).
+"""Tests for CachingMiddleware constructor, default key function, send_request,
+TTL validation, and LRU eviction (tasks 2.3.1–2.3.4).
 
 Covers: client storage, default parameter values (ttl, max_entries, key_fn),
 custom parameter storage, initial state of _cache and _in_flight (both empty
 dicts), BaseAgentClient inheritance, semaphore absence, per-instance isolation,
 stub delegation to the wrapped client, middleware composition,
 _default_key_fn (determinism, field sensitivity, SHA-256 hex output, stop list
-conversion, callable as a static method), and send_request (cache miss delegates
+conversion, callable as a static method), send_request (cache miss delegates
 to client, cache hit returns stored response without calling client, response
 stored with timestamp, custom key_fn used when provided, exception from client
-propagates without populating cache, per-key lock created in _in_flight).
+propagates without populating cache, per-key lock created in _in_flight),
+TTL (expired entries trigger re-fetch, valid entries served from cache, boundary
+at exact TTL is treated as expired, refresh on re-fetch), and LRU eviction
+(oldest entry removed at capacity, access order updated on hit, cache never
+exceeds max_entries).
 """
 
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
 
@@ -334,3 +339,128 @@ class TestSendRequest:
         for _ in range(5):
             await cm.send_request(req)
         assert provider.call_count == 1
+
+
+class TestTTL:
+    """CachingMiddleware TTL — expired entries trigger re-fetch; valid entries served from cache."""
+
+    @pytest.mark.asyncio
+    async def test_valid_entry_served_from_cache(self) -> None:
+        """Asserts that a non-expired entry is returned from cache without calling the client."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider, ttl=10.0)
+        req = AgentRequest(prompt="hi")
+        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=100.0):
+            await cm.send_request(req)
+        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=109.9):
+            await cm.send_request(req)  # elapsed=9.9 < 10.0 → valid
+        assert provider.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_expired_entry_calls_client_again(self) -> None:
+        """Asserts that a TTL-expired entry causes the client to be called again."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider, ttl=10.0)
+        req = AgentRequest(prompt="hi")
+        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=100.0):
+            await cm.send_request(req)
+        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=111.0):
+            await cm.send_request(req)  # elapsed=11.0 >= 10.0 → expired
+        assert provider.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_ttl_boundary_exactly_at_ttl_is_expired(self) -> None:
+        """Asserts that an entry with elapsed == ttl is treated as expired."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider, ttl=10.0)
+        req = AgentRequest(prompt="hi")
+        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=100.0):
+            await cm.send_request(req)
+        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=110.0):
+            await cm.send_request(req)  # elapsed=10.0 → not < ttl → expired
+        assert provider.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_expired_entry_refreshed_with_new_timestamp(self) -> None:
+        """Asserts that a re-fetched entry overwrites the expired one with a fresh timestamp."""
+        cm = CachingMiddleware(client=MockProvider(), ttl=10.0)
+        req = AgentRequest(prompt="hi")
+        key = CachingMiddleware._default_key_fn(req)
+        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=100.0):
+            await cm.send_request(req)
+        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=115.0):
+            await cm.send_request(req)
+            _, new_stored_at = cm._cache[key]
+        assert new_stored_at == 115.0
+
+    @pytest.mark.asyncio
+    async def test_expired_entry_removed_before_re_fetch(self) -> None:
+        """Asserts that an expired entry is absent from _cache while being re-fetched."""
+        cm = CachingMiddleware(client=MockProvider(), ttl=10.0)
+        req = AgentRequest(prompt="hi")
+        key = CachingMiddleware._default_key_fn(req)
+        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=100.0):
+            await cm.send_request(req)
+        # Verify it was stored
+        assert key in cm._cache
+        # Now expire and re-fetch; entry should be refreshed (not absent after)
+        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=115.0):
+            await cm.send_request(req)
+        assert key in cm._cache  # new entry stored after re-fetch
+
+
+class TestLRUEviction:
+    """CachingMiddleware LRU eviction — oldest-accessed entry removed when at capacity."""
+
+    @pytest.mark.asyncio
+    async def test_evicts_oldest_entry_at_capacity(self) -> None:
+        """Asserts that adding a third entry with max_entries=2 evicts the first-inserted entry."""
+        cm = CachingMiddleware(client=MockProvider(), max_entries=2)
+        await cm.send_request(AgentRequest(prompt="a"))
+        await cm.send_request(AgentRequest(prompt="b"))
+        await cm.send_request(AgentRequest(prompt="c"))
+        key_a = CachingMiddleware._default_key_fn(AgentRequest(prompt="a"))
+        assert key_a not in cm._cache
+        assert len(cm._cache) == 2
+
+    @pytest.mark.asyncio
+    async def test_access_updates_lru_order(self) -> None:
+        """Asserts that accessing an entry promotes it so a newer entry is evicted instead."""
+        cm = CachingMiddleware(client=MockProvider(), max_entries=2)
+        await cm.send_request(AgentRequest(prompt="a"))  # order: [a]
+        await cm.send_request(AgentRequest(prompt="b"))  # order: [a, b]
+        await cm.send_request(AgentRequest(prompt="a"))  # access a → order: [b, a]
+        await cm.send_request(AgentRequest(prompt="c"))  # evict b → order: [a, c]
+        key_a = CachingMiddleware._default_key_fn(AgentRequest(prompt="a"))
+        key_b = CachingMiddleware._default_key_fn(AgentRequest(prompt="b"))
+        assert key_a in cm._cache
+        assert key_b not in cm._cache
+
+    @pytest.mark.asyncio
+    async def test_max_entries_one_evicts_on_new_entry(self) -> None:
+        """Asserts that max_entries=1 always evicts the sole entry when a new one arrives."""
+        cm = CachingMiddleware(client=MockProvider(), max_entries=1)
+        await cm.send_request(AgentRequest(prompt="a"))
+        await cm.send_request(AgentRequest(prompt="b"))
+        assert len(cm._cache) == 1
+        key_a = CachingMiddleware._default_key_fn(AgentRequest(prompt="a"))
+        assert key_a not in cm._cache
+
+    @pytest.mark.asyncio
+    async def test_cache_never_exceeds_max_entries(self) -> None:
+        """Asserts that _cache length never exceeds max_entries after many requests."""
+        max_e = 5
+        cm = CachingMiddleware(client=MockProvider(), max_entries=max_e)
+        for i in range(20):
+            await cm.send_request(AgentRequest(prompt=f"prompt-{i}"))
+        assert len(cm._cache) <= max_e
+
+    @pytest.mark.asyncio
+    async def test_evicted_entry_is_re_fetched_from_client(self) -> None:
+        """Asserts that requesting an evicted entry results in a fresh client call."""
+        provider = MockProvider()
+        cm = CachingMiddleware(client=provider, max_entries=1)
+        await cm.send_request(AgentRequest(prompt="a"))  # cached
+        await cm.send_request(AgentRequest(prompt="b"))  # evicts a
+        await cm.send_request(AgentRequest(prompt="a"))  # cache miss → client called again
+        assert provider.call_count == 3
