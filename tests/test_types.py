@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mada_modelkit._types import AgentRequest, Attachment
+from mada_modelkit._types import AgentRequest, AgentResponse, Attachment
 
 
 class TestAttachment:
@@ -108,4 +108,47 @@ class TestAgentRequest:
     def test_inequality(self) -> None:
         r1 = AgentRequest(prompt="hello")
         r2 = AgentRequest(prompt="world")
+        assert r1 != r2
+
+
+class TestAgentResponse:
+    def test_construction(self) -> None:
+        resp = AgentResponse(content="Hi", model="gpt-4o", input_tokens=10, output_tokens=5)
+        assert resp.content == "Hi"
+        assert resp.model == "gpt-4o"
+        assert resp.input_tokens == 10
+        assert resp.output_tokens == 5
+
+    def test_default_metadata_empty_dict(self) -> None:
+        resp = AgentResponse(content="Hi", model="m", input_tokens=1, output_tokens=1)
+        assert resp.metadata == {}
+
+    def test_total_tokens_property(self) -> None:
+        resp = AgentResponse(content="Hi", model="m", input_tokens=10, output_tokens=5)
+        assert resp.total_tokens == 15
+
+    def test_total_tokens_zero(self) -> None:
+        resp = AgentResponse(content="", model="m", input_tokens=0, output_tokens=0)
+        assert resp.total_tokens == 0
+
+    def test_metadata_set(self) -> None:
+        resp = AgentResponse(
+            content="Hi", model="m", input_tokens=1, output_tokens=1, metadata={"finish_reason": "stop"}
+        )
+        assert resp.metadata["finish_reason"] == "stop"
+
+    def test_metadata_default_factory_independent(self) -> None:
+        r1 = AgentResponse(content="a", model="m", input_tokens=1, output_tokens=1)
+        r2 = AgentResponse(content="b", model="m", input_tokens=1, output_tokens=1)
+        r1.metadata["key"] = "value"
+        assert r2.metadata == {}
+
+    def test_equality(self) -> None:
+        r1 = AgentResponse(content="Hi", model="m", input_tokens=10, output_tokens=5)
+        r2 = AgentResponse(content="Hi", model="m", input_tokens=10, output_tokens=5)
+        assert r1 == r2
+
+    def test_inequality(self) -> None:
+        r1 = AgentResponse(content="Hi", model="m", input_tokens=10, output_tokens=5)
+        r2 = AgentResponse(content="Bye", model="m", input_tokens=10, output_tokens=5)
         assert r1 != r2

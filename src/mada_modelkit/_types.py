@@ -24,3 +24,18 @@ class AgentRequest:
     temperature: float = 0.7
     stop: list[str] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AgentResponse:
+    """What came back from the model."""
+
+    content: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
