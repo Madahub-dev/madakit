@@ -12,6 +12,7 @@ import time
 from typing import AsyncIterator
 
 from mada_modelkit._base import BaseAgentClient
+from mada_modelkit._errors import CircuitOpenError
 from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
 
 __all__ = ["CircuitBreakerMiddleware"]
@@ -75,8 +76,32 @@ class CircuitBreakerMiddleware(BaseAgentClient):
             return self._state
 
     async def send_request(self, request: AgentRequest) -> AgentResponse:
-        """Delegate to the wrapped client (circuit logic added in task 2.2.3)."""
-        return await self._client.send_request(request)
+        """Execute request with circuit breaker protection.
+
+        Closed: passes through to the wrapped client; records failures and successes.
+        Open: raises CircuitOpenError immediately without calling the client.
+        Half-open: probes the backend via health_check first; if the probe fails the
+        circuit reopens and CircuitOpenError is raised; if the probe succeeds the
+        request is attempted — success closes the circuit, failure reopens it.
+        """
+        state = await self._check_state()
+
+        if state == "open":
+            raise CircuitOpenError("Circuit breaker is open")
+
+        if state == "half-open":
+            healthy = await self._client.health_check()
+            if not healthy:
+                await self._record_failure()
+                raise CircuitOpenError("Circuit breaker reopened: health check failed")
+
+        try:
+            response = await self._client.send_request(request)
+            await self._record_success()
+            return response
+        except Exception:
+            await self._record_failure()
+            raise
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
         """Delegate streaming to the wrapped client (circuit logic added in task 2.2.4)."""
