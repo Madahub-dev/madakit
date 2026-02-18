@@ -1,18 +1,23 @@
-"""Tests for FallbackMiddleware constructor and sequential send_request (tasks 2.5.1–2.5.2).
+"""Tests for FallbackMiddleware constructor, sequential and hedged send_request (tasks 2.5.1–2.5.3).
 
 Covers: primary storage, fallbacks list storage and order, default
 fast_fail_ms (None), custom fast_fail_ms storage, BaseAgentClient
 inheritance, semaphore absence, empty fallbacks list, per-instance
 independence, stub delegation to the primary client, sequential fallback
 on primary failure, ordered fallback traversal, last-exception propagation,
-no-fallback edge case, and call-count verification.
+no-fallback edge case, call-count verification, hedged mode timing,
+fallback task launch after timeout, first-response wins, loser client
+cancel() invocation, and no-fallback hedged path.
 """
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from helpers import MockProvider
+from mada_modelkit._base import BaseAgentClient
 from mada_modelkit._base import BaseAgentClient
 from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
 from mada_modelkit.middleware.fallback import FallbackMiddleware
@@ -258,3 +263,119 @@ class TestSequentialSendRequest:
         )
         result = await middleware.send_request(AgentRequest(prompt="hi"))
         assert result is expected
+
+
+# ---------------------------------------------------------------------------
+# Hedged-mode helper
+# ---------------------------------------------------------------------------
+
+
+class _CancellableProvider(BaseAgentClient):
+    """Provider with configurable latency that records cancel() invocations."""
+
+    def __init__(self, response: AgentResponse, latency: float = 0.0) -> None:
+        """Initialise with a fixed response and optional sleep latency."""
+        super().__init__()
+        self._response = response
+        self._latency = latency
+        self.cancel_called = False
+
+    async def send_request(self, request: AgentRequest) -> AgentResponse:
+        """Sleep for latency seconds then return the fixed response."""
+        if self._latency:
+            await asyncio.sleep(self._latency)
+        return self._response
+
+    async def cancel(self) -> None:
+        """Record that cancel() was called."""
+        self.cancel_called = True
+
+
+class TestHedgedSendRequest:
+    """FallbackMiddleware.send_request — hedged mode (fast_fail_ms set)."""
+
+    @pytest.mark.asyncio
+    async def test_primary_wins_when_responds_before_timeout(self) -> None:
+        """Asserts that the primary response is returned when it responds within fast_fail_ms."""
+        expected = AgentResponse(content="primary", model="m", input_tokens=1, output_tokens=1)
+        middleware = FallbackMiddleware(
+            primary=MockProvider(responses=[expected]),
+            fallbacks=[MockProvider()],
+            fast_fail_ms=10_000.0,  # 10 s — primary always wins
+        )
+        result = await middleware.send_request(AgentRequest(prompt="hi"))
+        assert result is expected
+
+    @pytest.mark.asyncio
+    async def test_fallback_not_started_when_primary_wins(self) -> None:
+        """Asserts that the fallback client is not invoked when primary responds in time."""
+        fallback = MockProvider()
+        middleware = FallbackMiddleware(
+            primary=MockProvider(),
+            fallbacks=[fallback],
+            fast_fail_ms=10_000.0,
+        )
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert fallback.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_fallback_started_when_primary_exceeds_timeout(self) -> None:
+        """Asserts that the fallback is invoked when primary does not respond within fast_fail_ms."""
+        fallback = MockProvider()
+        middleware = FallbackMiddleware(
+            primary=MockProvider(latency=0.05),   # 50 ms
+            fallbacks=[fallback],
+            fast_fail_ms=1.0,                     # 1 ms timeout
+        )
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert fallback.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_fallback_response_returned_when_primary_slow(self) -> None:
+        """Asserts that the fallback's response is returned when the primary times out."""
+        expected = AgentResponse(content="fallback", model="fb", input_tokens=1, output_tokens=1)
+        middleware = FallbackMiddleware(
+            primary=MockProvider(latency=0.05),
+            fallbacks=[MockProvider(responses=[expected])],
+            fast_fail_ms=1.0,
+        )
+        result = await middleware.send_request(AgentRequest(prompt="hi"))
+        assert result is expected
+
+    @pytest.mark.asyncio
+    async def test_loser_client_cancel_called(self) -> None:
+        """Asserts that cancel() is called on the client whose task loses the race."""
+        slow_resp = AgentResponse(content="slow", model="m", input_tokens=1, output_tokens=1)
+        primary = _CancellableProvider(response=slow_resp, latency=0.05)
+        middleware = FallbackMiddleware(
+            primary=primary,
+            fallbacks=[MockProvider()],
+            fast_fail_ms=1.0,
+        )
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert primary.cancel_called is True
+
+    @pytest.mark.asyncio
+    async def test_no_fallbacks_with_fast_fail_still_returns_primary(self) -> None:
+        """Asserts that the primary is awaited after timeout when no fallbacks are configured."""
+        expected = AgentResponse(content="slow-primary", model="m", input_tokens=1, output_tokens=1)
+        middleware = FallbackMiddleware(
+            primary=MockProvider(responses=[expected], latency=0.01),  # 10 ms
+            fallbacks=[],
+            fast_fail_ms=1.0,  # times out, but no fallback → wait for primary
+        )
+        result = await middleware.send_request(AgentRequest(prompt="hi"))
+        assert result is expected
+
+    @pytest.mark.asyncio
+    async def test_primary_exception_within_timeout_propagates(self) -> None:
+        """Asserts that a quick primary failure is re-raised without starting the fallback."""
+        fallback = MockProvider()
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("quick fail")]),
+            fallbacks=[fallback],
+            fast_fail_ms=10_000.0,
+        )
+        with pytest.raises(RuntimeError, match="quick fail"):
+            await middleware.send_request(AgentRequest(prompt="hi"))
+        assert fallback.call_count == 0
