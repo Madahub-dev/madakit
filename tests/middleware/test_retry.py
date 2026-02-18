@@ -1,7 +1,9 @@
-"""Tests for RetryMiddleware constructor (task 2.1.1).
+"""Tests for RetryMiddleware constructor and _default_is_retryable (tasks 2.1.1–2.1.2).
 
 Covers: attribute storage, default values, custom is_retryable predicate,
-BaseAgentClient inheritance, and semaphore passthrough via super().__init__().
+BaseAgentClient inheritance, semaphore passthrough via super().__init__(),
+and _default_is_retryable classification of ProviderError status codes and
+non-ProviderError exceptions.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ import pytest
 
 from helpers import MockProvider
 from mada_modelkit._base import BaseAgentClient
+from mada_modelkit._errors import ProviderError
 from mada_modelkit.middleware.retry import RetryMiddleware
 
 
@@ -116,3 +119,64 @@ class TestRetryMiddlewareStubDelegation:
         assert len(chunks) == 1
         assert chunks[0].delta == "mock"
         assert chunks[0].is_final is True
+
+
+class TestDefaultIsRetryable:
+    """RetryMiddleware._default_is_retryable — retryability classification."""
+
+    def test_provider_error_none_status_is_retryable(self) -> None:
+        """Asserts that ProviderError with status_code=None is retryable."""
+        assert RetryMiddleware._default_is_retryable(ProviderError("oops")) is True
+
+    def test_provider_error_429_is_retryable(self) -> None:
+        """Asserts that ProviderError with status_code=429 (rate limited) is retryable."""
+        assert RetryMiddleware._default_is_retryable(ProviderError("rate limited", 429)) is True
+
+    def test_provider_error_500_is_retryable(self) -> None:
+        """Asserts that ProviderError with status_code=500 is retryable."""
+        assert RetryMiddleware._default_is_retryable(ProviderError("server error", 500)) is True
+
+    def test_provider_error_503_is_retryable(self) -> None:
+        """Asserts that ProviderError with status_code=503 is retryable."""
+        assert RetryMiddleware._default_is_retryable(ProviderError("unavailable", 503)) is True
+
+    def test_provider_error_599_is_retryable(self) -> None:
+        """Asserts that ProviderError with status_code=599 (any >=500) is retryable."""
+        assert RetryMiddleware._default_is_retryable(ProviderError("error", 599)) is True
+
+    def test_provider_error_400_not_retryable(self) -> None:
+        """Asserts that ProviderError with status_code=400 (bad request) is not retryable."""
+        assert RetryMiddleware._default_is_retryable(ProviderError("bad request", 400)) is False
+
+    def test_provider_error_401_not_retryable(self) -> None:
+        """Asserts that ProviderError with status_code=401 (unauthorized) is not retryable."""
+        assert RetryMiddleware._default_is_retryable(ProviderError("unauthorized", 401)) is False
+
+    def test_provider_error_403_not_retryable(self) -> None:
+        """Asserts that ProviderError with status_code=403 (forbidden) is not retryable."""
+        assert RetryMiddleware._default_is_retryable(ProviderError("forbidden", 403)) is False
+
+    def test_provider_error_404_not_retryable(self) -> None:
+        """Asserts that ProviderError with status_code=404 (not found) is not retryable."""
+        assert RetryMiddleware._default_is_retryable(ProviderError("not found", 404)) is False
+
+    def test_provider_error_422_not_retryable(self) -> None:
+        """Asserts that ProviderError with status_code=422 (unprocessable) is not retryable."""
+        assert RetryMiddleware._default_is_retryable(ProviderError("unprocessable", 422)) is False
+
+    def test_value_error_not_retryable(self) -> None:
+        """Asserts that a plain ValueError is not retryable."""
+        assert RetryMiddleware._default_is_retryable(ValueError("bad value")) is False
+
+    def test_os_error_not_retryable(self) -> None:
+        """Asserts that an OSError is not retryable."""
+        assert RetryMiddleware._default_is_retryable(OSError("io error")) is False
+
+    def test_runtime_error_not_retryable(self) -> None:
+        """Asserts that a RuntimeError is not retryable."""
+        assert RetryMiddleware._default_is_retryable(RuntimeError("runtime")) is False
+
+    def test_callable_via_instance(self) -> None:
+        """Asserts that _default_is_retryable is accessible via an instance."""
+        middleware = RetryMiddleware(client=MockProvider())
+        assert middleware._default_is_retryable(ProviderError("err", 500)) is True

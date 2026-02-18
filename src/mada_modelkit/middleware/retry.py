@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import AsyncIterator
 
 from mada_modelkit._base import BaseAgentClient
+from mada_modelkit._errors import ProviderError
 from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
 
 __all__ = ["RetryMiddleware"]
@@ -40,6 +41,23 @@ class RetryMiddleware(BaseAgentClient):
         self._max_retries = max_retries
         self._backoff_base = backoff_base
         self._is_retryable = is_retryable
+
+    @staticmethod
+    def _default_is_retryable(exc: Exception) -> bool:
+        """Return True if the exception should trigger a retry attempt.
+
+        Rules:
+        - ProviderError with status_code=None (unknown server error): retryable.
+        - ProviderError with status_code=429 (rate limited): retryable.
+        - ProviderError with status_code>=500 (server error): retryable.
+        - ProviderError with any other 4xx (client error): not retryable.
+        - Any non-ProviderError exception: not retryable.
+        """
+        if isinstance(exc, ProviderError):
+            if exc.status_code is None:
+                return True
+            return exc.status_code == 429 or exc.status_code >= 500
+        return False
 
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Delegate to the wrapped client (full retry logic added in task 2.1.3)."""
