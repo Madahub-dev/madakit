@@ -1,5 +1,4 @@
-"""Tests for CircuitBreakerMiddleware constructor, state machine, send_request,
-send_request_stream, recovery probing, and concurrent access safety (tasks 2.2.1–2.2.6).
+"""Tests for CircuitBreakerMiddleware — comprehensive coverage (tasks 2.2.1–2.2.7).
 
 Covers: attribute storage, default values, initial state fields
 (_failure_count, _state, _last_failure_time, _lock), BaseAgentClient
@@ -9,8 +8,11 @@ half-open→open on failure), send_request circuit logic (closed passthrough,
 open raises CircuitOpenError, half-open health-check probe then request),
 send_request_stream with the same closed/open/half-open circuit logic,
 recovery probing (health_check call count, not called in wrong states,
-exception propagation without failure recording), and concurrent access safety
-(asyncio.Lock correctness under concurrent state mutations).
+exception propagation without failure recording), concurrent access safety
+(asyncio.Lock correctness under concurrent state mutations), module exports
+(__all__), virtual method defaults (health_check, close, cancel), and
+end-to-end integration (full state cycle, stacked middleware, context manager,
+stream recovery cycle).
 """
 
 from __future__ import annotations
@@ -744,3 +746,128 @@ class TestConcurrentAccess:
         )
         await asyncio.gather(*coros)
         assert cb._state in {"closed", "open", "half-open"}
+
+
+# ---------------------------------------------------------------------------
+# Module exports
+# ---------------------------------------------------------------------------
+
+
+class TestModuleExports:
+    """mada_modelkit.middleware.circuit_breaker module — __all__ and importability."""
+
+    def test_all_contains_circuit_breaker_middleware(self) -> None:
+        """Asserts that __all__ lists CircuitBreakerMiddleware."""
+        from mada_modelkit.middleware import circuit_breaker
+
+        assert "CircuitBreakerMiddleware" in circuit_breaker.__all__
+
+    def test_all_has_exactly_one_export(self) -> None:
+        """Asserts that __all__ exposes exactly one public name."""
+        from mada_modelkit.middleware import circuit_breaker
+
+        assert len(circuit_breaker.__all__) == 1
+
+    def test_circuit_breaker_middleware_importable_from_module(self) -> None:
+        """Asserts that CircuitBreakerMiddleware can be imported directly from the module."""
+        from mada_modelkit.middleware.circuit_breaker import (
+            CircuitBreakerMiddleware as CB,
+        )
+
+        assert CB is CircuitBreakerMiddleware
+
+
+# ---------------------------------------------------------------------------
+# Virtual method defaults
+# ---------------------------------------------------------------------------
+
+
+class TestVirtualMethodDefaults:
+    """CircuitBreakerMiddleware virtual method defaults — health_check, close, cancel."""
+
+    @pytest.mark.asyncio
+    async def test_health_check_returns_true(self) -> None:
+        """Asserts that health_check returns True (inherited BaseAgentClient default)."""
+        cb = CircuitBreakerMiddleware(client=MockProvider())
+        assert await cb.health_check() is True
+
+    @pytest.mark.asyncio
+    async def test_close_completes_without_error(self) -> None:
+        """Asserts that close() completes without raising."""
+        cb = CircuitBreakerMiddleware(client=MockProvider())
+        await cb.close()
+
+    @pytest.mark.asyncio
+    async def test_cancel_completes_without_error(self) -> None:
+        """Asserts that cancel() completes without raising."""
+        cb = CircuitBreakerMiddleware(client=MockProvider())
+        await cb.cancel()
+
+
+# ---------------------------------------------------------------------------
+# Integration
+# ---------------------------------------------------------------------------
+
+
+class TestIntegration:
+    """CircuitBreakerMiddleware end-to-end — full state cycles and middleware composition."""
+
+    @pytest.mark.asyncio
+    async def test_full_closed_open_half_open_closed_cycle(self) -> None:
+        """Asserts the complete state cycle: closed→open (failures)→half-open (timeout)→closed."""
+        errors = [ProviderError("err", 500)] * 3
+        cb = CircuitBreakerMiddleware(
+            client=MockProvider(errors=errors), failure_threshold=3, recovery_timeout=10.0
+        )
+        # Drive to open
+        for _ in range(3):
+            with pytest.raises(ProviderError):
+                await cb.send_request(AgentRequest(prompt="hi"))
+        assert cb._state == "open"
+
+        # Open blocks requests
+        with pytest.raises(CircuitOpenError):
+            await cb.send_request(AgentRequest(prompt="hi"))
+
+        # Simulate recovery timeout elapsed → half-open probe succeeds → closed
+        cb._last_failure_time = time.monotonic() - 11.0
+        await cb.send_request(AgentRequest(prompt="hi"))
+        assert cb._state == "closed"
+
+    @pytest.mark.asyncio
+    async def test_stream_full_recovery_cycle(self) -> None:
+        """Asserts that send_request_stream participates in the full closed→open→closed cycle."""
+        errors = [ProviderError("err", 500)] * 3
+        cb = CircuitBreakerMiddleware(
+            client=MockProvider(errors=errors), failure_threshold=3, recovery_timeout=10.0
+        )
+        for _ in range(3):
+            with pytest.raises(ProviderError):
+                async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+                    pass
+        assert cb._state == "open"
+
+        cb._last_failure_time = time.monotonic() - 11.0
+        chunks = []
+        async for chunk in cb.send_request_stream(AgentRequest(prompt="hi")):
+            chunks.append(chunk)
+        assert cb._state == "closed"
+        assert len(chunks) == 1
+
+    @pytest.mark.asyncio
+    async def test_stacked_circuit_breaker_wraps_retry_middleware(self) -> None:
+        """Asserts CircuitBreakerMiddleware correctly composes over RetryMiddleware."""
+        from mada_modelkit.middleware.retry import RetryMiddleware
+
+        inner = RetryMiddleware(client=MockProvider(), max_retries=0)
+        cb = CircuitBreakerMiddleware(client=inner, failure_threshold=5)
+        result = await cb.send_request(AgentRequest(prompt="hi"))
+        assert cb._state == "closed"
+        assert result.content == "mock"
+
+    @pytest.mark.asyncio
+    async def test_context_manager_completes_without_error(self) -> None:
+        """Asserts that CircuitBreakerMiddleware works as an async context manager."""
+        async with CircuitBreakerMiddleware(client=MockProvider()) as cb:
+            result = await cb.send_request(AgentRequest(prompt="hi"))
+        assert result.content == "mock"
