@@ -1,5 +1,5 @@
 """Tests for CachingMiddleware constructor, default key function, send_request,
-TTL validation, and LRU eviction (tasks 2.3.1–2.3.4).
+TTL validation, LRU eviction, and request coalescing (tasks 2.3.1–2.3.5).
 
 Covers: client storage, default parameter values (ttl, max_entries, key_fn),
 custom parameter storage, initial state of _cache and _in_flight (both empty
@@ -11,9 +11,10 @@ to client, cache hit returns stored response without calling client, response
 stored with timestamp, custom key_fn used when provided, exception from client
 propagates without populating cache, per-key lock created in _in_flight),
 TTL (expired entries trigger re-fetch, valid entries served from cache, boundary
-at exact TTL is treated as expired, refresh on re-fetch), and LRU eviction
-(oldest entry removed at capacity, access order updated on hit, cache never
-exceeds max_entries).
+at exact TTL is treated as expired, refresh on re-fetch), LRU eviction (oldest
+entry removed at capacity, access order updated on hit, cache never exceeds
+max_entries), and request coalescing (concurrent identical requests call client
+once, all callers receive the same response, different keys are independent).
 """
 
 from __future__ import annotations
@@ -464,3 +465,80 @@ class TestLRUEviction:
         await cm.send_request(AgentRequest(prompt="b"))  # evicts a
         await cm.send_request(AgentRequest(prompt="a"))  # cache miss → client called again
         assert provider.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Coalescing helper
+# ---------------------------------------------------------------------------
+
+
+class _YieldingProvider(MockProvider):
+    """MockProvider that yields to the event loop before responding.
+
+    The asyncio.sleep(0) allows concurrent coroutines waiting at the per-key
+    lock to start before the first request completes, exercising real coalescing.
+    """
+
+    async def send_request(self, request: AgentRequest) -> AgentResponse:
+        """Increment call_count, yield once, then return a fixed response."""
+        self.call_count += 1
+        await asyncio.sleep(0)
+        return AgentResponse(content="yielded", model="m", input_tokens=1, output_tokens=1)
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestRequestCoalescing:
+    """CachingMiddleware singleflight — concurrent identical requests share one client call."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_identical_requests_call_client_once(self) -> None:
+        """Asserts that N concurrent requests with the same key call the client exactly once."""
+        provider = _YieldingProvider()
+        cm = CachingMiddleware(client=provider)
+        req = AgentRequest(prompt="coalesce")
+        results = await asyncio.gather(*[cm.send_request(req) for _ in range(5)])
+        assert provider.call_count == 1
+        assert len(results) == 5
+
+    @pytest.mark.asyncio
+    async def test_concurrent_identical_requests_all_return_same_response(self) -> None:
+        """Asserts that all concurrent callers receive the identical response object."""
+        cm = CachingMiddleware(client=_YieldingProvider())
+        req = AgentRequest(prompt="coalesce")
+        results = await asyncio.gather(*[cm.send_request(req) for _ in range(5)])
+        # All results are the same cached object
+        first = results[0]
+        assert all(r is first for r in results)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_identical_requests_populate_cache_once(self) -> None:
+        """Asserts that concurrent coalescing leaves exactly one entry in _cache."""
+        cm = CachingMiddleware(client=_YieldingProvider())
+        req = AgentRequest(prompt="coalesce")
+        await asyncio.gather(*[cm.send_request(req) for _ in range(5)])
+        assert len(cm._cache) == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_different_keys_are_independent(self) -> None:
+        """Asserts that concurrent requests with different keys each call the client once."""
+        provider = _YieldingProvider()
+        cm = CachingMiddleware(client=provider)
+        reqs = [AgentRequest(prompt=f"key-{i}") for i in range(4)]
+        await asyncio.gather(*[cm.send_request(r) for r in reqs])
+        assert provider.call_count == 4
+        assert len(cm._cache) == 4
+
+    @pytest.mark.asyncio
+    async def test_in_flight_has_separate_lock_per_unique_key(self) -> None:
+        """Asserts that _in_flight contains a distinct lock for each unique cache key."""
+        cm = CachingMiddleware(client=_YieldingProvider())
+        reqs = [AgentRequest(prompt=f"p{i}") for i in range(3)]
+        await asyncio.gather(*[cm.send_request(r) for r in reqs])
+        locks = list(cm._in_flight.values())
+        assert len(locks) == 3
+        # All locks are distinct objects
+        assert len({id(lk) for lk in locks}) == 3
