@@ -10,6 +10,7 @@ accumulation, cost_fn invocation and accumulation, and exception safety.
 
 from __future__ import annotations
 
+from typing import AsyncIterator
 from unittest.mock import patch
 
 import pytest
@@ -18,6 +19,24 @@ from helpers import MockProvider
 from mada_modelkit._base import BaseAgentClient
 from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk, TrackingStats
 from mada_modelkit.middleware.tracking import TrackingMiddleware
+
+
+class _MultiChunkProvider(BaseAgentClient):
+    """Provider that yields a pre-specified list of StreamChunks in order."""
+
+    def __init__(self, chunks: list[StreamChunk]) -> None:
+        """Initialise with the list of chunks to yield."""
+        super().__init__()
+        self._chunks = chunks
+
+    async def send_request(self, request: AgentRequest) -> AgentResponse:
+        """Return a placeholder response (stream tests do not use this path)."""
+        return AgentResponse(content="", model="m", input_tokens=0, output_tokens=0)
+
+    async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:  # type: ignore[override]
+        """Yield all pre-loaded chunks in order."""
+        for chunk in self._chunks:
+            yield chunk
 
 
 class TestTrackingMiddlewareConstructor:
@@ -255,3 +274,137 @@ class TestSendRequest:
         middleware = TrackingMiddleware(client=MockProvider(responses=[expected]))
         result = await middleware.send_request(AgentRequest(prompt="hi"))
         assert result is expected
+
+
+class TestSendRequestStream:
+    """TrackingMiddleware.send_request_stream — TTFT, inference timing, token tracking."""
+
+    @pytest.mark.asyncio
+    async def test_ttft_ms_set_in_first_chunk_metadata(self) -> None:
+        """Asserts that the first yielded chunk has ttft_ms in its metadata dict."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        chunks = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert "ttft_ms" in chunks[0].metadata
+
+    @pytest.mark.asyncio
+    async def test_ttft_ms_is_non_negative(self) -> None:
+        """Asserts that metadata["ttft_ms"] on the first chunk is >= 0.0."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        chunks = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert chunks[0].metadata["ttft_ms"] >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_ttft_ms_uses_perf_counter(self) -> None:
+        """Asserts that ttft_ms equals the difference between start and first-chunk perf_counter."""
+        # Single-chunk stream: perf_counter called as start, ttft, elapsed (3 calls).
+        side_effects = [0.0, 0.3, 0.5]
+        middleware = TrackingMiddleware(client=MockProvider())
+        with patch("mada_modelkit.middleware.tracking.time.perf_counter", side_effect=side_effects):
+            chunks = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert chunks[0].metadata["ttft_ms"] == pytest.approx(300.0)
+
+    @pytest.mark.asyncio
+    async def test_total_ttft_ms_accumulates_across_calls(self) -> None:
+        """Asserts that total_ttft_ms sums TTFT values across multiple stream calls."""
+        # Each single-chunk stream uses 3 perf_counter calls: start, ttft, elapsed.
+        side_effects = [0.0, 0.1, 0.2,   # call 1: ttft = 100 ms
+                        0.0, 0.3, 0.6]   # call 2: ttft = 300 ms
+        middleware = TrackingMiddleware(client=MockProvider())
+        with patch("mada_modelkit.middleware.tracking.time.perf_counter", side_effect=side_effects):
+            async for _ in middleware.send_request_stream(AgentRequest(prompt="a")):
+                pass
+            async for _ in middleware.send_request_stream(AgentRequest(prompt="b")):
+                pass
+        assert middleware._stats.total_ttft_ms == pytest.approx(400.0)
+
+    @pytest.mark.asyncio
+    async def test_inference_ms_accumulated_on_final_chunk(self) -> None:
+        """Asserts that total_inference_ms is positive after the stream completes."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
+            pass
+        assert middleware._stats.total_inference_ms > 0.0
+
+    @pytest.mark.asyncio
+    async def test_inference_ms_uses_perf_counter(self) -> None:
+        """Asserts that inference_ms equals elapsed time from start to the final chunk."""
+        side_effects = [0.0, 0.1, 0.5]  # start=0, ttft at 0.1, elapsed at 0.5 → 500 ms
+        middleware = TrackingMiddleware(client=MockProvider())
+        with patch("mada_modelkit.middleware.tracking.time.perf_counter", side_effect=side_effects):
+            async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+        assert middleware._stats.total_inference_ms == pytest.approx(500.0)
+
+    @pytest.mark.asyncio
+    async def test_non_first_chunk_has_no_ttft_in_metadata(self) -> None:
+        """Asserts that subsequent chunks do not have ttft_ms injected into metadata."""
+        chunks_in = [
+            StreamChunk(delta="a"),
+            StreamChunk(delta="b", is_final=True),
+        ]
+        middleware = TrackingMiddleware(client=_MultiChunkProvider(chunks_in))
+        chunks_out = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert "ttft_ms" not in chunks_out[1].metadata
+
+    @pytest.mark.asyncio
+    async def test_single_chunk_stream_has_ttft_when_is_final(self) -> None:
+        """Asserts that a single-chunk stream with is_final=True still gets ttft_ms."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        chunks = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert chunks[0].is_final is True
+        assert "ttft_ms" in chunks[0].metadata
+
+    @pytest.mark.asyncio
+    async def test_input_tokens_accumulated_from_final_chunk_metadata(self) -> None:
+        """Asserts that input_tokens from the final chunk's metadata is accumulated."""
+        chunks_in = [StreamChunk(delta="x", is_final=True, metadata={"input_tokens": 5})]
+        middleware = TrackingMiddleware(client=_MultiChunkProvider(chunks_in))
+        async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
+            pass
+        assert middleware._stats.total_input_tokens == 5
+
+    @pytest.mark.asyncio
+    async def test_output_tokens_accumulated_from_final_chunk_metadata(self) -> None:
+        """Asserts that output_tokens from the final chunk's metadata is accumulated."""
+        chunks_in = [StreamChunk(delta="x", is_final=True, metadata={"output_tokens": 3})]
+        middleware = TrackingMiddleware(client=_MultiChunkProvider(chunks_in))
+        async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
+            pass
+        assert middleware._stats.total_output_tokens == 3
+
+    @pytest.mark.asyncio
+    async def test_tokens_default_to_zero_when_absent_from_metadata(self) -> None:
+        """Asserts that token stats remain zero if the final chunk has no token metadata."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
+            pass
+        assert middleware._stats.total_input_tokens == 0
+        assert middleware._stats.total_output_tokens == 0
+
+    @pytest.mark.asyncio
+    async def test_exception_before_first_chunk_does_not_update_stats(self) -> None:
+        """Asserts that stats remain unchanged when the client raises before yielding."""
+        middleware = TrackingMiddleware(client=MockProvider(errors=[RuntimeError("fail")]))
+        with pytest.raises(RuntimeError):
+            async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+        assert middleware._stats.total_ttft_ms == 0.0
+        assert middleware._stats.total_inference_ms == 0.0
+        assert middleware._stats.total_input_tokens == 0
+        assert middleware._stats.total_output_tokens == 0
+
+    @pytest.mark.asyncio
+    async def test_original_chunk_delta_preserved(self) -> None:
+        """Asserts that the delta value is preserved when ttft_ms metadata is injected."""
+        chunks_in = [StreamChunk(delta="hello", is_final=True)]
+        middleware = TrackingMiddleware(client=_MultiChunkProvider(chunks_in))
+        chunks_out = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert chunks_out[0].delta == "hello"
+
+    @pytest.mark.asyncio
+    async def test_original_chunk_is_final_preserved(self) -> None:
+        """Asserts that is_final is preserved when ttft_ms metadata is injected."""
+        chunks_in = [StreamChunk(delta="x", is_final=True)]
+        middleware = TrackingMiddleware(client=_MultiChunkProvider(chunks_in))
+        chunks_out = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert chunks_out[0].is_final is True

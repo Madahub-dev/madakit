@@ -60,6 +60,31 @@ class TrackingMiddleware(BaseAgentClient):
         return response
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
-        """Delegate to wrapped client (stub; full TTFT tracking added in task 2.4.3)."""
+        """Stream chunks with TTFT measurement, per-stream timing, and token tracking.
+
+        Times the interval from stream start to the first yielded chunk (TTFT),
+        sets ``metadata["ttft_ms"]`` on that chunk, and accumulates
+        ``total_ttft_ms``. On the chunk where ``is_final=True``, accumulates
+        ``total_inference_ms`` (measured from stream start) and reads
+        ``input_tokens``/``output_tokens`` from the chunk's metadata (defaulting
+        to 0 if absent). Exceptions raised before the first chunk propagate
+        without updating any stats.
+        """
+        start = time.perf_counter()
+        first_chunk = True
         async for chunk in self._client.send_request_stream(request):
+            if first_chunk:
+                ttft_ms = (time.perf_counter() - start) * 1000.0
+                chunk = StreamChunk(
+                    delta=chunk.delta,
+                    is_final=chunk.is_final,
+                    metadata={**chunk.metadata, "ttft_ms": ttft_ms},
+                )
+                self._stats.total_ttft_ms += ttft_ms
+                first_chunk = False
+            if chunk.is_final:
+                elapsed_ms = (time.perf_counter() - start) * 1000.0
+                self._stats.total_inference_ms += elapsed_ms
+                self._stats.total_input_tokens += chunk.metadata.get("input_tokens", 0)
+                self._stats.total_output_tokens += chunk.metadata.get("output_tokens", 0)
             yield chunk
