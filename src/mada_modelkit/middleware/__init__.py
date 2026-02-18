@@ -1,5 +1,19 @@
 """Middleware package for mada-modelkit.
 
-Re-exports all middleware classes. Zero external dependencies — stdlib only.
-Full exports added in task 2.6.1 once all middleware are implemented.
+Re-exports all middleware classes for convenient top-level access.
+Zero external dependencies — stdlib only.
 """
+
+from mada_modelkit.middleware.cache import CachingMiddleware
+from mada_modelkit.middleware.circuit_breaker import CircuitBreakerMiddleware
+from mada_modelkit.middleware.fallback import FallbackMiddleware
+from mada_modelkit.middleware.retry import RetryMiddleware
+from mada_modelkit.middleware.tracking import TrackingMiddleware
+
+__all__ = [
+    "CachingMiddleware",
+    "CircuitBreakerMiddleware",
+    "FallbackMiddleware",
+    "RetryMiddleware",
+    "TrackingMiddleware",
+]
