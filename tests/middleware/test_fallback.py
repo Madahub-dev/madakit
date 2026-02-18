@@ -1,4 +1,4 @@
-"""Tests for FallbackMiddleware (tasks 2.5.1–2.5.4).
+"""Tests for FallbackMiddleware (tasks 2.5.1–2.5.5).
 
 Covers: primary storage, fallbacks list storage and order, default
 fast_fail_ms (None), custom fast_fail_ms storage, BaseAgentClient
@@ -8,8 +8,9 @@ on primary failure, ordered fallback traversal, last-exception propagation,
 no-fallback edge case, call-count verification, hedged mode timing,
 fallback task launch after timeout, first-response wins, loser client
 cancel() invocation, no-fallback hedged path, send_request_stream
-pre-first-chunk fallback, commitment after first chunk, and all-fail
-stream propagation.
+pre-first-chunk fallback, commitment after first chunk, all-fail stream
+propagation, module exports, virtual method defaults, and end-to-end
+integration scenarios.
 """
 
 from __future__ import annotations
@@ -494,4 +495,101 @@ class TestSendRequestStream:
             ],
         )
         chunks = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert chunks[0].delta == "mock"
+
+
+class TestModuleExports:
+    """Module-level exports — __all__ and public name availability."""
+
+    def test_all_is_defined(self) -> None:
+        """Asserts that __all__ is defined in the fallback module."""
+        import mada_modelkit.middleware.fallback as mod
+        assert hasattr(mod, "__all__")
+
+    def test_fallback_middleware_in_all(self) -> None:
+        """Asserts that 'FallbackMiddleware' is listed in __all__."""
+        import mada_modelkit.middleware.fallback as mod
+        assert "FallbackMiddleware" in mod.__all__
+
+    def test_fallback_middleware_importable(self) -> None:
+        """Asserts that FallbackMiddleware can be imported from the fallback module."""
+        from mada_modelkit.middleware.fallback import FallbackMiddleware as FM
+        assert FM is FallbackMiddleware
+
+
+class TestVirtualMethodDefaults:
+    """FallbackMiddleware inherited virtual methods — health_check, cancel, close."""
+
+    @pytest.mark.asyncio
+    async def test_health_check_returns_true(self) -> None:
+        """Asserts that health_check returns True (inherited default)."""
+        middleware = FallbackMiddleware(primary=MockProvider(), fallbacks=[])
+        assert await middleware.health_check() is True
+
+    @pytest.mark.asyncio
+    async def test_cancel_is_no_op(self) -> None:
+        """Asserts that cancel() completes without raising."""
+        middleware = FallbackMiddleware(primary=MockProvider(), fallbacks=[])
+        await middleware.cancel()
+
+    @pytest.mark.asyncio
+    async def test_close_is_no_op(self) -> None:
+        """Asserts that close() completes without raising."""
+        middleware = FallbackMiddleware(primary=MockProvider(), fallbacks=[])
+        await middleware.close()
+
+
+class TestIntegration:
+    """FallbackMiddleware end-to-end — composition, stacking, context manager."""
+
+    @pytest.mark.asyncio
+    async def test_context_manager(self) -> None:
+        """Asserts that FallbackMiddleware works as an async context manager."""
+        async with FallbackMiddleware(primary=MockProvider(), fallbacks=[]) as mw:
+            result = await mw.send_request(AgentRequest(prompt="hi"))
+        assert result.content == "mock"
+
+    @pytest.mark.asyncio
+    async def test_nested_fallback_as_primary(self) -> None:
+        """Asserts that a FallbackMiddleware instance is accepted as the primary of another."""
+        inner = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("inner-primary")]),
+            fallbacks=[MockProvider()],
+        )
+        outer = FallbackMiddleware(primary=inner, fallbacks=[])
+        result = await outer.send_request(AgentRequest(prompt="hi"))
+        assert result.content == "mock"
+
+    @pytest.mark.asyncio
+    async def test_stacked_with_retry_as_fallback(self) -> None:
+        """Asserts that a RetryMiddleware instance works correctly as a fallback."""
+        from mada_modelkit.middleware.retry import RetryMiddleware
+
+        retry_fallback = RetryMiddleware(client=MockProvider(), max_retries=0)
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("down")]),
+            fallbacks=[retry_fallback],
+        )
+        result = await middleware.send_request(AgentRequest(prompt="hi"))
+        assert result.content == "mock"
+
+    @pytest.mark.asyncio
+    async def test_multiple_sequential_calls_are_independent(self) -> None:
+        """Asserts that two consecutive calls each trigger their own fallback logic."""
+        primary = MockProvider(errors=[RuntimeError("call1"), RuntimeError("call2")])
+        fallback = MockProvider()
+        middleware = FallbackMiddleware(primary=primary, fallbacks=[fallback])
+        r1 = await middleware.send_request(AgentRequest(prompt="a"))
+        r2 = await middleware.send_request(AgentRequest(prompt="b"))
+        assert r1.content == "mock"
+        assert r2.content == "mock"
+        assert fallback.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_send_request_and_stream_work_on_same_instance(self) -> None:
+        """Asserts that send_request and send_request_stream can both be used on one instance."""
+        middleware = FallbackMiddleware(primary=MockProvider(), fallbacks=[])
+        resp = await middleware.send_request(AgentRequest(prompt="hi"))
+        chunks = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert resp.content == "mock"
         assert chunks[0].delta == "mock"
