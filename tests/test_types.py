@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 from mada_modelkit._types import AgentRequest, AgentResponse, Attachment, StreamChunk, TrackingStats
 
 
@@ -267,3 +269,81 @@ class TestTrackingStats:
         snapshot = stats.reset()
         assert snapshot.total_requests == 0
         assert snapshot.total_cost_usd is None
+
+
+class TestTypeAnnotations:
+    """Verify field names and that total_tokens is a property, not a field."""
+
+    def test_attachment_field_names(self) -> None:
+        names = {f.name for f in dataclasses.fields(Attachment)}
+        assert names == {"content", "media_type", "filename"}
+
+    def test_agent_request_field_names(self) -> None:
+        names = {f.name for f in dataclasses.fields(AgentRequest)}
+        assert names == {"prompt", "system_prompt", "attachments", "max_tokens", "temperature", "stop", "metadata"}
+
+    def test_agent_response_field_names(self) -> None:
+        names = {f.name for f in dataclasses.fields(AgentResponse)}
+        assert names == {"content", "model", "input_tokens", "output_tokens", "metadata"}
+
+    def test_stream_chunk_field_names(self) -> None:
+        names = {f.name for f in dataclasses.fields(StreamChunk)}
+        assert names == {"delta", "is_final", "metadata"}
+
+    def test_tracking_stats_field_names(self) -> None:
+        names = {f.name for f in dataclasses.fields(TrackingStats)}
+        assert names == {
+            "total_requests",
+            "total_input_tokens",
+            "total_output_tokens",
+            "total_inference_ms",
+            "total_ttft_ms",
+            "total_cost_usd",
+        }
+
+    def test_total_tokens_is_property(self) -> None:
+        assert isinstance(AgentResponse.total_tokens, property)
+
+    def test_total_tokens_not_a_dataclass_field(self) -> None:
+        names = {f.name for f in dataclasses.fields(AgentResponse)}
+        assert "total_tokens" not in names
+
+    def test_all_types_are_dataclasses(self) -> None:
+        for cls in (Attachment, AgentRequest, AgentResponse, StreamChunk, TrackingStats):
+            assert dataclasses.is_dataclass(cls)
+
+
+class TestIntegration:
+    """Cross-type usage patterns."""
+
+    def test_agent_request_with_multiple_attachments(self) -> None:
+        atts = [
+            Attachment(content=b"\x89PNG", media_type="image/png", filename="a.png"),
+            Attachment(content=b"%PDF", media_type="application/pdf"),
+        ]
+        req = AgentRequest(prompt="Analyse these", attachments=atts)
+        assert len(req.attachments) == 2
+        assert req.attachments[0].filename == "a.png"
+        assert req.attachments[1].filename is None
+
+    def test_agent_response_total_tokens_large_values(self) -> None:
+        resp = AgentResponse(content="...", model="m", input_tokens=8192, output_tokens=4096)
+        assert resp.total_tokens == 12288
+
+    def test_tracking_stats_multiple_resets(self) -> None:
+        stats = TrackingStats(total_requests=10, total_input_tokens=500)
+        snap1 = stats.reset()
+        stats.total_requests = 3
+        stats.total_input_tokens = 60
+        snap2 = stats.reset()
+        assert snap1.total_requests == 10
+        assert snap1.total_input_tokens == 500
+        assert snap2.total_requests == 3
+        assert snap2.total_input_tokens == 60
+        assert stats.total_requests == 0
+        assert stats.total_input_tokens == 0
+
+    def test_stream_chunk_final_with_metadata(self) -> None:
+        chunk = StreamChunk(delta="", is_final=True, metadata={"finish_reason": "stop"})
+        assert chunk.is_final is True
+        assert chunk.metadata["finish_reason"] == "stop"
