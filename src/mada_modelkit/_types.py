@@ -1,3 +1,10 @@
+"""Public type contracts for mada-modelkit.
+
+Defines the five core dataclasses that cross every layer of the library:
+Attachment, AgentRequest, AgentResponse, StreamChunk, and TrackingStats.
+No external dependencies — stdlib only.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

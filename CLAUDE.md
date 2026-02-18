@@ -37,6 +37,10 @@ The unit of work is a **task** (from IMPLEMENTATION.md). Each task is an atomic,
 - mypy strict mode
 - No `print()` in library code
 - Tests with pytest + pytest-asyncio
+- **Docstrings required at every level.**
+  - *Module* — every `.py` file opens with a docstring before imports. Library modules: state purpose and zero-dep constraint. Test modules: state what is under test and which aspects are covered.
+  - *Class* — every class has a one-line docstring. Library classes: purpose. Test classes: the subject under test.
+  - *Method/function* — every public function or method in `src/` has a docstring. Every test method in `tests/` has a one-sentence docstring stating what it asserts.
 
 ## Key Architectural Rules
 
