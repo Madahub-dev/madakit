@@ -290,3 +290,66 @@ class TestVirtualMethods:
                 return False
 
         assert await _UnhealthyClient().health_check() is False
+
+
+class TestContextManager:
+    """Tests for the async context manager protocol (__aenter__ / __aexit__)."""
+
+    @pytest.mark.asyncio
+    async def test_aenter_returns_self(self) -> None:
+        """__aenter__ returns the client instance itself."""
+        client = _ConcreteClient()
+        result = await client.__aenter__()
+        assert result is client
+
+    @pytest.mark.asyncio
+    async def test_async_with_yields_client(self) -> None:
+        """The async with statement binds to the client instance."""
+        async with _ConcreteClient() as client:
+            assert isinstance(client, _ConcreteClient)
+
+    @pytest.mark.asyncio
+    async def test_aexit_calls_close(self) -> None:
+        """__aexit__ calls close() on the client."""
+        close_calls: list[bool] = []
+
+        class _TrackingClose(BaseAgentClient):
+            async def send_request(self, request: AgentRequest) -> AgentResponse:
+                """Return a fixed response."""
+                return AgentResponse(content="x", model="m", input_tokens=1, output_tokens=1)
+
+            async def close(self) -> None:
+                """Record that close was called."""
+                close_calls.append(True)
+
+        async with _TrackingClose():
+            pass
+
+        assert close_calls == [True]
+
+    @pytest.mark.asyncio
+    async def test_close_called_on_exception(self) -> None:
+        """close() is called even when the body of the async with raises."""
+        close_calls: list[bool] = []
+
+        class _TrackingClose(BaseAgentClient):
+            async def send_request(self, request: AgentRequest) -> AgentResponse:
+                """Return a fixed response."""
+                return AgentResponse(content="x", model="m", input_tokens=1, output_tokens=1)
+
+            async def close(self) -> None:
+                """Record that close was called."""
+                close_calls.append(True)
+
+        with pytest.raises(RuntimeError):
+            async with _TrackingClose():
+                raise RuntimeError("body error")
+
+        assert close_calls == [True]
+
+    @pytest.mark.asyncio
+    async def test_client_usable_inside_context(self) -> None:
+        """send_request is callable normally inside the async with block."""
+        async with _ConcreteClient() as client:
+            response = await client.send_request(AgentRequest(prompt="hi"))
+            assert response.content == "ok"

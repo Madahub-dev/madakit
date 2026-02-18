@@ -44,3 +44,11 @@ class BaseAgentClient(ABC):
 
     async def close(self) -> None:
         """Release resources (HTTP client, model, executor). No-op by default."""
+
+    async def __aenter__(self) -> BaseAgentClient:
+        """Enter the async context manager, returning self."""
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        """Exit the async context manager, calling close()."""
+        await self.close()
