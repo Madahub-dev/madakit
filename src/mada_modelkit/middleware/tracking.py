@@ -37,6 +37,15 @@ class TrackingMiddleware(BaseAgentClient):
         self._cost_fn = cost_fn
         self._stats: TrackingStats = TrackingStats()
 
+    @property
+    def stats(self) -> TrackingStats:
+        """Return the current aggregate statistics snapshot.
+
+        No lock is required: single-expression increments in asyncio are
+        cooperative and therefore effectively atomic within a single event loop.
+        """
+        return self._stats
+
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Execute request and record wall-clock time, token usage, and optional cost.
 

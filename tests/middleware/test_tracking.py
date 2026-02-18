@@ -39,6 +39,39 @@ class _MultiChunkProvider(BaseAgentClient):
             yield chunk
 
 
+class TestStatsProperty:
+    """TrackingMiddleware.stats — returns the live TrackingStats instance."""
+
+    def test_returns_tracking_stats_instance(self) -> None:
+        """Asserts that stats returns a TrackingStats object."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        assert isinstance(middleware.stats, TrackingStats)
+
+    def test_returns_same_object_as_internal_stats(self) -> None:
+        """Asserts that stats is the same object as _stats (no copy)."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        assert middleware.stats is middleware._stats
+
+    def test_reflects_mutations_made_via_internal_stats(self) -> None:
+        """Asserts that changes to _stats are visible through stats."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        middleware._stats.total_requests = 7
+        assert middleware.stats.total_requests == 7
+
+    @pytest.mark.asyncio
+    async def test_reflects_live_state_after_send_request(self) -> None:
+        """Asserts that stats reflects updated counts after send_request completes."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        assert middleware.stats.total_requests == 1
+
+    def test_two_instances_have_independent_stats_properties(self) -> None:
+        """Asserts that stats on two instances are not the same object."""
+        m1 = TrackingMiddleware(client=MockProvider())
+        m2 = TrackingMiddleware(client=MockProvider())
+        assert m1.stats is not m2.stats
+
+
 class TestTrackingMiddlewareConstructor:
     """TrackingMiddleware.__init__ — attribute storage and initial stats state."""
 
