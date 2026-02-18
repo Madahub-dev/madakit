@@ -118,6 +118,25 @@ class FallbackMiddleware(BaseAgentClient):
         return winner_task.result()
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
-        """Delegate to primary (stub; pre-first-chunk fallback added in task 2.5.4)."""
-        async for chunk in self._primary.send_request_stream(request):
-            yield chunk
+        """Stream with pre-first-chunk fallback only.
+
+        Iterates ``[primary] + fallbacks`` sequentially, attempting each until
+        one yields its first chunk. Once any chunk reaches the consumer the
+        middleware is committed to that provider — subsequent errors propagate
+        directly without attempting further fallbacks. If every provider raises
+        before yielding a first chunk, re-raises the last exception.
+        """
+        last_exc: Exception | None = None
+        for client in [self._primary, *self._fallbacks]:
+            first_yielded = False
+            try:
+                async for chunk in client.send_request_stream(request):
+                    first_yielded = True
+                    yield chunk
+                return  # stream completed normally
+            except Exception as exc:
+                if first_yielded:
+                    raise  # committed; propagate directly to consumer
+                last_exc = exc
+        assert last_exc is not None
+        raise last_exc

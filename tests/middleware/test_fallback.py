@@ -1,4 +1,4 @@
-"""Tests for FallbackMiddleware constructor, sequential and hedged send_request (tasks 2.5.1–2.5.3).
+"""Tests for FallbackMiddleware (tasks 2.5.1–2.5.4).
 
 Covers: primary storage, fallbacks list storage and order, default
 fast_fail_ms (None), custom fast_fail_ms storage, BaseAgentClient
@@ -7,7 +7,9 @@ independence, stub delegation to the primary client, sequential fallback
 on primary failure, ordered fallback traversal, last-exception propagation,
 no-fallback edge case, call-count verification, hedged mode timing,
 fallback task launch after timeout, first-response wins, loser client
-cancel() invocation, and no-fallback hedged path.
+cancel() invocation, no-fallback hedged path, send_request_stream
+pre-first-chunk fallback, commitment after first chunk, and all-fail
+stream propagation.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+
+from typing import AsyncIterator
 
 from helpers import MockProvider
 from mada_modelkit._base import BaseAgentClient
@@ -379,3 +383,115 @@ class TestHedgedSendRequest:
         with pytest.raises(RuntimeError, match="quick fail"):
             await middleware.send_request(AgentRequest(prompt="hi"))
         assert fallback.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Stream helper
+# ---------------------------------------------------------------------------
+
+
+class _FailAfterChunkProvider(BaseAgentClient):
+    """Provider that yields one chunk and then raises to simulate mid-stream failure."""
+
+    def __init__(self, chunk: StreamChunk, error: Exception) -> None:
+        """Initialise with the chunk to yield and the error to raise afterward."""
+        super().__init__()
+        self._chunk = chunk
+        self._error = error
+
+    async def send_request(self, request: AgentRequest) -> AgentResponse:
+        """Return a placeholder response (stream tests do not use this path)."""
+        return AgentResponse(content="", model="m", input_tokens=0, output_tokens=0)
+
+    async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:  # type: ignore[override]
+        """Yield the configured chunk then raise the configured error."""
+        yield self._chunk
+        raise self._error
+
+
+class TestSendRequestStream:
+    """FallbackMiddleware.send_request_stream — pre-first-chunk fallback only."""
+
+    @pytest.mark.asyncio
+    async def test_primary_stream_yields_chunks_to_consumer(self) -> None:
+        """Asserts that chunks from the primary stream reach the consumer unchanged."""
+        middleware = FallbackMiddleware(primary=MockProvider(), fallbacks=[MockProvider()])
+        chunks = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert len(chunks) == 1
+        assert chunks[0].delta == "mock"
+
+    @pytest.mark.asyncio
+    async def test_pre_first_chunk_failure_triggers_fallback(self) -> None:
+        """Asserts that the fallback stream is used when the primary raises before yielding."""
+        fallback = MockProvider()
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("stream down")]),
+            fallbacks=[fallback],
+        )
+        chunks = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert chunks[0].delta == "mock"
+
+    @pytest.mark.asyncio
+    async def test_fallback_chunks_returned_on_primary_stream_failure(self) -> None:
+        """Asserts that all fallback chunks are delivered when the primary fails pre-first-chunk."""
+        expected = AgentResponse(content="fb-chunk", model="m", input_tokens=1, output_tokens=1)
+        fallback = MockProvider(responses=[expected])
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("down")]),
+            fallbacks=[fallback],
+        )
+        chunks = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert chunks[0].delta == "fb-chunk"
+
+    @pytest.mark.asyncio
+    async def test_committed_after_first_chunk_post_error_propagates(self) -> None:
+        """Asserts that an error after the first chunk propagates without trying fallbacks."""
+        first_chunk = StreamChunk(delta="first")
+        provider = _FailAfterChunkProvider(chunk=first_chunk, error=RuntimeError("mid-stream"))
+        fallback = MockProvider()
+        middleware = FallbackMiddleware(primary=provider, fallbacks=[fallback])
+        with pytest.raises(RuntimeError, match="mid-stream"):
+            async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+        assert fallback.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_committed_after_first_chunk_consumer_receives_first_chunk(self) -> None:
+        """Asserts that the first chunk is delivered to the consumer before the error."""
+        first_chunk = StreamChunk(delta="first")
+        provider = _FailAfterChunkProvider(chunk=first_chunk, error=RuntimeError("mid-stream"))
+        middleware = FallbackMiddleware(primary=provider, fallbacks=[MockProvider()])
+        received: list[StreamChunk] = []
+        with pytest.raises(RuntimeError):
+            async for chunk in middleware.send_request_stream(AgentRequest(prompt="hi")):
+                received.append(chunk)
+        assert len(received) == 1
+        assert received[0].delta == "first"
+
+    @pytest.mark.asyncio
+    async def test_all_providers_fail_before_first_chunk_raises_last_exception(self) -> None:
+        """Asserts that the last provider's exception is raised when all fail pre-first-chunk."""
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("primary")]),
+            fallbacks=[
+                MockProvider(errors=[RuntimeError("f1")]),
+                MockProvider(errors=[ValueError("last")]),
+            ],
+        )
+        with pytest.raises(ValueError, match="last"):
+            async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_fallbacks_tried_in_order_before_first_chunk(self) -> None:
+        """Asserts that the second fallback is reached only after the first fails pre-first-chunk."""
+        f2 = MockProvider()
+        middleware = FallbackMiddleware(
+            primary=MockProvider(errors=[RuntimeError("primary")]),
+            fallbacks=[
+                MockProvider(errors=[RuntimeError("f1")]),
+                f2,
+            ],
+        )
+        chunks = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
+        assert chunks[0].delta == "mock"
