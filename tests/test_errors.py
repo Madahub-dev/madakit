@@ -215,3 +215,96 @@ class TestRetryExhaustedError:
     def test_not_a_provider_error(self) -> None:
         """RetryExhaustedError is not a subclass of ProviderError."""
         assert not issubclass(RetryExhaustedError, ProviderError)
+
+
+class TestHierarchy:
+    """Consolidated isinstance checks across the full error tree."""
+
+    def test_provider_error_isinstance_chain(self) -> None:
+        """A ProviderError instance satisfies the full upward chain."""
+        err = ProviderError("fail", status_code=500)
+        assert isinstance(err, ProviderError)
+        assert isinstance(err, AgentError)
+        assert isinstance(err, Exception)
+
+    def test_circuit_open_error_isinstance_chain(self) -> None:
+        """A CircuitOpenError instance satisfies the full upward chain."""
+        err = CircuitOpenError("open")
+        assert isinstance(err, CircuitOpenError)
+        assert isinstance(err, MiddlewareError)
+        assert isinstance(err, AgentError)
+        assert isinstance(err, Exception)
+
+    def test_retry_exhausted_error_isinstance_chain(self) -> None:
+        """A RetryExhaustedError instance satisfies the full upward chain."""
+        err = RetryExhaustedError("done", last_error=OSError("x"))
+        assert isinstance(err, RetryExhaustedError)
+        assert isinstance(err, MiddlewareError)
+        assert isinstance(err, AgentError)
+        assert isinstance(err, Exception)
+
+    def test_provider_and_middleware_are_siblings(self) -> None:
+        """ProviderError and MiddlewareError are independent branches under AgentError."""
+        assert not issubclass(ProviderError, MiddlewareError)
+        assert not issubclass(MiddlewareError, ProviderError)
+
+    def test_all_errors_are_agent_errors(self) -> None:
+        """Every concrete error type is an AgentError."""
+        for cls in (ProviderError, MiddlewareError, CircuitOpenError, RetryExhaustedError):
+            assert issubclass(cls, AgentError), f"{cls.__name__} must be an AgentError"
+
+    def test_middleware_subtypes_are_not_provider_errors(self) -> None:
+        """No middleware subtype bleeds into the ProviderError branch."""
+        for cls in (MiddlewareError, CircuitOpenError, RetryExhaustedError):
+            assert not issubclass(cls, ProviderError), f"{cls.__name__} must not be a ProviderError"
+
+
+class TestIntegration:
+    """Realistic error-handling patterns across the hierarchy."""
+
+    def test_retry_wraps_provider_error(self) -> None:
+        """RetryExhaustedError correctly wraps a ProviderError as last_error."""
+        cause = ProviderError("upstream timeout", status_code=503)
+        err = RetryExhaustedError("3 attempts failed", last_error=cause)
+        assert isinstance(err.last_error, ProviderError)
+        assert err.last_error.status_code == 503
+        assert str(err) == "3 attempts failed"
+        assert str(err.last_error) == "upstream timeout"
+
+    def test_circuit_open_and_retry_both_caught_as_middleware(self) -> None:
+        """Both MiddlewareError subtypes are caught by a single MiddlewareError handler."""
+        errors: list[Exception] = [
+            CircuitOpenError("open"),
+            RetryExhaustedError("exhausted", last_error=OSError("net")),
+        ]
+        for exc in errors:
+            with pytest.raises(MiddlewareError):
+                raise exc
+
+    def test_generic_agent_error_handler_catches_all(self) -> None:
+        """A single AgentError handler catches every concrete error type."""
+        errors: list[Exception] = [
+            AgentError("base"),
+            ProviderError("provider"),
+            MiddlewareError("middleware"),
+            CircuitOpenError("circuit"),
+            RetryExhaustedError("retry", last_error=ValueError("v")),
+        ]
+        for exc in errors:
+            with pytest.raises(AgentError):
+                raise exc
+
+    def test_status_code_accessible_after_catch(self) -> None:
+        """status_code is readable on a caught ProviderError."""
+        try:
+            raise ProviderError("rate limited", status_code=429)
+        except ProviderError as exc:
+            assert exc.status_code == 429
+
+    def test_last_error_accessible_after_catch(self) -> None:
+        """last_error is readable on a caught RetryExhaustedError."""
+        cause = ProviderError("bad gateway", status_code=502)
+        try:
+            raise RetryExhaustedError("gave up", last_error=cause)
+        except RetryExhaustedError as exc:
+            assert exc.last_error is cause
