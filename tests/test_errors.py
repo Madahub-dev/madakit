@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._errors import AgentError, CircuitOpenError, MiddlewareError, ProviderError
+from mada_modelkit._errors import (
+    AgentError,
+    CircuitOpenError,
+    MiddlewareError,
+    ProviderError,
+    RetryExhaustedError,
+)
 
 
 class TestAgentError:
@@ -157,3 +163,55 @@ class TestCircuitOpenError:
     def test_not_a_provider_error(self) -> None:
         """CircuitOpenError is not a subclass of ProviderError."""
         assert not issubclass(CircuitOpenError, ProviderError)
+
+
+class TestRetryExhaustedError:
+    """Tests for the RetryExhaustedError exception."""
+
+    def test_is_middleware_error(self) -> None:
+        """RetryExhaustedError is a subclass of MiddlewareError."""
+        assert issubclass(RetryExhaustedError, MiddlewareError)
+
+    def test_is_agent_error(self) -> None:
+        """RetryExhaustedError is a subclass of AgentError."""
+        assert issubclass(RetryExhaustedError, AgentError)
+
+    def test_is_exception(self) -> None:
+        """RetryExhaustedError is a subclass of Exception."""
+        assert issubclass(RetryExhaustedError, Exception)
+
+    def test_message_preserved(self) -> None:
+        """The error message is accessible via str()."""
+        err = RetryExhaustedError("all retries failed", last_error=ValueError("x"))
+        assert str(err) == "all retries failed"
+
+    def test_last_error_stored(self) -> None:
+        """last_error holds the exception from the final attempt."""
+        cause = ProviderError("timeout", status_code=503)
+        err = RetryExhaustedError("retries exhausted", last_error=cause)
+        assert err.last_error is cause
+
+    def test_last_error_type_preserved(self) -> None:
+        """last_error retains its original type."""
+        cause = ProviderError("bad gateway", status_code=502)
+        err = RetryExhaustedError("done", last_error=cause)
+        assert isinstance(err.last_error, ProviderError)
+        assert err.last_error.status_code == 502
+
+    def test_caught_as_middleware_error(self) -> None:
+        """RetryExhaustedError is caught by a MiddlewareError handler."""
+        with pytest.raises(MiddlewareError):
+            raise RetryExhaustedError("exhausted", last_error=OSError("conn"))
+
+    def test_caught_as_agent_error(self) -> None:
+        """RetryExhaustedError is caught by an AgentError handler."""
+        with pytest.raises(AgentError):
+            raise RetryExhaustedError("exhausted", last_error=OSError("conn"))
+
+    def test_not_a_circuit_open_error(self) -> None:
+        """RetryExhaustedError is not a subclass of CircuitOpenError."""
+        assert not issubclass(RetryExhaustedError, CircuitOpenError)
+
+    def test_not_a_provider_error(self) -> None:
+        """RetryExhaustedError is not a subclass of ProviderError."""
+        assert not issubclass(RetryExhaustedError, ProviderError)

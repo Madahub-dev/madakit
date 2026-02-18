@@ -27,3 +27,12 @@ class MiddlewareError(AgentError):
 
 class CircuitOpenError(MiddlewareError):
     """Raised when a request is rejected because the circuit breaker is open."""
+
+
+class RetryExhaustedError(MiddlewareError):
+    """Raised when all retry attempts have been exhausted."""
+
+    def __init__(self, message: str, last_error: Exception) -> None:
+        """Store the error message and the exception from the final attempt."""
+        super().__init__(message)
+        self.last_error = last_error
