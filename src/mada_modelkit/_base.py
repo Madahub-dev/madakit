@@ -7,6 +7,7 @@ with sensible defaults. No external dependencies — stdlib only.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
@@ -15,6 +16,17 @@ from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
 
 class BaseAgentClient(ABC):
     """Common interface for every AI backend and middleware layer."""
+
+    def __init__(self, max_concurrent: int | None = None) -> None:
+        """Initialise the client with an optional concurrency limit.
+
+        Args:
+            max_concurrent: Maximum number of simultaneous in-flight requests.
+                Creates an asyncio.Semaphore when set. None means unlimited.
+        """
+        self._semaphore: asyncio.Semaphore | None = (
+            asyncio.Semaphore(max_concurrent) if max_concurrent else None
+        )
 
     @abstractmethod
     async def send_request(self, request: AgentRequest) -> AgentResponse:

@@ -8,6 +8,8 @@ their respective tasks complete.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from mada_modelkit._base import BaseAgentClient
@@ -353,3 +355,39 @@ class TestContextManager:
         async with _ConcreteClient() as client:
             response = await client.send_request(AgentRequest(prompt="hi"))
             assert response.content == "ok"
+
+
+class TestSemaphore:
+    """Tests for max_concurrent / _semaphore initialisation."""
+
+    def test_semaphore_none_by_default(self) -> None:
+        """_semaphore is None when max_concurrent is not provided."""
+        client = _ConcreteClient()
+        assert client._semaphore is None
+
+    def test_semaphore_none_when_explicit_none(self) -> None:
+        """_semaphore is None when max_concurrent=None is passed explicitly."""
+        client = _ConcreteClient(max_concurrent=None)
+        assert client._semaphore is None
+
+    def test_semaphore_created_when_max_concurrent_set(self) -> None:
+        """_semaphore is an asyncio.Semaphore when max_concurrent is given."""
+        client = _ConcreteClient(max_concurrent=5)
+        assert isinstance(client._semaphore, asyncio.Semaphore)
+
+    def test_semaphore_respects_limit(self) -> None:
+        """The semaphore's internal counter matches the requested max_concurrent."""
+        client = _ConcreteClient(max_concurrent=3)
+        assert client._semaphore is not None
+        assert client._semaphore._value == 3  # type: ignore[attr-defined]
+
+    def test_semaphore_limit_one(self) -> None:
+        """max_concurrent=1 creates a binary semaphore."""
+        client = _ConcreteClient(max_concurrent=1)
+        assert isinstance(client._semaphore, asyncio.Semaphore)
+
+    def test_semaphore_independent_across_instances(self) -> None:
+        """Each instance gets its own semaphore object."""
+        c1 = _ConcreteClient(max_concurrent=2)
+        c2 = _ConcreteClient(max_concurrent=2)
+        assert c1._semaphore is not c2._semaphore
