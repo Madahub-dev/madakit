@@ -1,9 +1,10 @@
 """Tests for mada_modelkit._base.
 
 Covers BaseAgentClient: abstract enforcement, concrete subclass instantiation,
-send_request signature and delegation, and ABC registration. Further methods
-(streaming, generate, health_check, context manager, semaphore) are added as
-their respective tasks complete.
+send_request and send_request_stream (default and native-streaming override),
+generate / generate_stream, health_check / cancel / close virtual methods,
+async context manager lifecycle, and semaphore initialisation. Integration
+tests combine multiple features using MockProvider from conftest.
 """
 
 from __future__ import annotations
@@ -11,6 +12,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+
+from typing import AsyncIterator
+
+from helpers import MockProvider
 
 from mada_modelkit._base import BaseAgentClient
 from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
@@ -391,3 +396,112 @@ class TestSemaphore:
         c1 = _ConcreteClient(max_concurrent=2)
         c2 = _ConcreteClient(max_concurrent=2)
         assert c1._semaphore is not c2._semaphore
+
+
+class TestMockProvider:
+    """Tests confirming MockProvider (from conftest) satisfies the BaseAgentClient contract."""
+
+    def test_is_base_agent_client(self) -> None:
+        """MockProvider is a BaseAgentClient subclass."""
+        assert issubclass(MockProvider, BaseAgentClient)
+
+    @pytest.mark.asyncio
+    async def test_default_response(self) -> None:
+        """MockProvider returns the fixed default when no responses are queued."""
+        provider = MockProvider()
+        response = await provider.send_request(AgentRequest(prompt="hi"))
+        assert response.content == "mock"
+        assert response.model == "mock"
+
+    @pytest.mark.asyncio
+    async def test_pre_loaded_response(self) -> None:
+        """MockProvider returns queued responses in order."""
+        r = AgentResponse(content="queued", model="m", input_tokens=1, output_tokens=1)
+        provider = MockProvider(responses=[r])
+        response = await provider.send_request(AgentRequest(prompt="hi"))
+        assert response.content == "queued"
+
+    @pytest.mark.asyncio
+    async def test_pre_loaded_error(self) -> None:
+        """MockProvider raises queued errors in order."""
+        from mada_modelkit._errors import ProviderError
+
+        provider = MockProvider(errors=[ProviderError("boom", status_code=500)])
+        with pytest.raises(ProviderError):
+            await provider.send_request(AgentRequest(prompt="hi"))
+
+    @pytest.mark.asyncio
+    async def test_call_count_increments(self) -> None:
+        """MockProvider tracks the number of send_request calls."""
+        provider = MockProvider()
+        assert provider.call_count == 0
+        await provider.send_request(AgentRequest(prompt="a"))
+        await provider.send_request(AgentRequest(prompt="b"))
+        assert provider.call_count == 2
+
+    def test_max_concurrent_propagated(self) -> None:
+        """MockProvider forwards max_concurrent to BaseAgentClient.__init__."""
+        provider = MockProvider(max_concurrent=4)
+        assert isinstance(provider._semaphore, asyncio.Semaphore)
+
+
+class TestIntegration:
+    """Cross-feature integration tests using MockProvider and _ConcreteClient."""
+
+    @pytest.mark.asyncio
+    async def test_generate_inside_context_manager(self) -> None:
+        """generate works correctly inside an async with block."""
+        async with MockProvider() as client:
+            response = await client.generate("hello world")
+            assert response.content == "mock"
+
+    @pytest.mark.asyncio
+    async def test_generate_stream_inside_context_manager(self) -> None:
+        """generate_stream works correctly inside an async with block."""
+        async with MockProvider() as client:
+            chunks = [c async for c in client.generate_stream("stream")]
+        assert len(chunks) == 1
+        assert chunks[0].is_final is True
+
+    @pytest.mark.asyncio
+    async def test_native_streaming_override(self) -> None:
+        """A subclass that overrides send_request_stream yields its own chunks."""
+        class _NativeStreamer(BaseAgentClient):
+            """Client with a native multi-chunk streaming implementation."""
+
+            async def send_request(self, request: AgentRequest) -> AgentResponse:
+                """Return a single aggregated response."""
+                return AgentResponse(content="ab", model="m", input_tokens=1, output_tokens=2)
+
+            async def send_request_stream(
+                self, request: AgentRequest
+            ) -> AsyncIterator[StreamChunk]:
+                """Yield two chunks natively without calling send_request."""
+                yield StreamChunk(delta="a", is_final=False)
+                yield StreamChunk(delta="b", is_final=True)
+
+        chunks = [c async for c in _NativeStreamer().send_request_stream(AgentRequest(prompt="x"))]
+        assert len(chunks) == 2
+        assert chunks[0].delta == "a"
+        assert chunks[0].is_final is False
+        assert chunks[1].delta == "b"
+        assert chunks[1].is_final is True
+
+    @pytest.mark.asyncio
+    async def test_semaphore_can_be_acquired(self) -> None:
+        """The semaphore created by max_concurrent is usable in an async context."""
+        provider = MockProvider(max_concurrent=2)
+        assert provider._semaphore is not None
+        async with provider._semaphore:
+            assert provider._semaphore._value == 1  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_multiple_responses_consumed_in_order(self) -> None:
+        """MockProvider serves multiple queued responses in FIFO order."""
+        r1 = AgentResponse(content="first", model="m", input_tokens=1, output_tokens=1)
+        r2 = AgentResponse(content="second", model="m", input_tokens=1, output_tokens=1)
+        provider = MockProvider(responses=[r1, r2])
+        resp1 = await provider.generate("a")
+        resp2 = await provider.generate("b")
+        assert resp1.content == "first"
+        assert resp2.content == "second"
