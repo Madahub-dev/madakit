@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mada_modelkit._types import Attachment
+from mada_modelkit._types import AgentRequest, Attachment
 
 
 class TestAttachment:
@@ -38,3 +38,74 @@ class TestAttachment:
     def test_default_filename_none(self) -> None:
         att = Attachment(content=b"data", media_type="application/pdf")
         assert att.filename is None
+
+
+class TestAgentRequest:
+    def test_construction_minimal(self) -> None:
+        req = AgentRequest(prompt="Hello")
+        assert req.prompt == "Hello"
+
+    def test_default_system_prompt_none(self) -> None:
+        req = AgentRequest(prompt="p")
+        assert req.system_prompt is None
+
+    def test_default_attachments_empty_list(self) -> None:
+        req = AgentRequest(prompt="p")
+        assert req.attachments == []
+
+    def test_default_max_tokens(self) -> None:
+        req = AgentRequest(prompt="p")
+        assert req.max_tokens == 1024
+
+    def test_default_temperature(self) -> None:
+        req = AgentRequest(prompt="p")
+        assert req.temperature == 0.7
+
+    def test_default_stop_none(self) -> None:
+        req = AgentRequest(prompt="p")
+        assert req.stop is None
+
+    def test_default_metadata_empty_dict(self) -> None:
+        req = AgentRequest(prompt="p")
+        assert req.metadata == {}
+
+    def test_all_fields_set(self) -> None:
+        att = Attachment(content=b"\x89PNG", media_type="image/png")
+        req = AgentRequest(
+            prompt="describe this image",
+            system_prompt="You are helpful.",
+            attachments=[att],
+            max_tokens=512,
+            temperature=0.3,
+            stop=["<end>"],
+            metadata={"top_p": 0.9},
+        )
+        assert req.prompt == "describe this image"
+        assert req.system_prompt == "You are helpful."
+        assert req.attachments == [att]
+        assert req.max_tokens == 512
+        assert req.temperature == 0.3
+        assert req.stop == ["<end>"]
+        assert req.metadata == {"top_p": 0.9}
+
+    def test_attachments_default_factory_independent(self) -> None:
+        r1 = AgentRequest(prompt="a")
+        r2 = AgentRequest(prompt="b")
+        r1.attachments.append(Attachment(content=b"x", media_type="text/plain"))
+        assert r2.attachments == []
+
+    def test_metadata_default_factory_independent(self) -> None:
+        r1 = AgentRequest(prompt="a")
+        r2 = AgentRequest(prompt="b")
+        r1.metadata["key"] = "value"
+        assert r2.metadata == {}
+
+    def test_equality(self) -> None:
+        r1 = AgentRequest(prompt="hello", max_tokens=256)
+        r2 = AgentRequest(prompt="hello", max_tokens=256)
+        assert r1 == r2
+
+    def test_inequality(self) -> None:
+        r1 = AgentRequest(prompt="hello")
+        r2 = AgentRequest(prompt="world")
+        assert r1 != r2
