@@ -1,18 +1,22 @@
-"""Tests for RetryMiddleware constructor and _default_is_retryable (tasks 2.1.1–2.1.2).
+"""Tests for RetryMiddleware constructor, _default_is_retryable, and send_request
+(tasks 2.1.1–2.1.3).
 
 Covers: attribute storage, default values, custom is_retryable predicate,
 BaseAgentClient inheritance, semaphore passthrough via super().__init__(),
-and _default_is_retryable classification of ProviderError status codes and
-non-ProviderError exceptions.
+_default_is_retryable classification of ProviderError status codes and
+non-ProviderError exceptions, retry loop correctness, exponential backoff
+sleep timing, and RetryExhaustedError on exhaustion.
 """
 
 from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from helpers import MockProvider
 from mada_modelkit._base import BaseAgentClient
-from mada_modelkit._errors import ProviderError
+from mada_modelkit._errors import ProviderError, RetryExhaustedError
 from mada_modelkit.middleware.retry import RetryMiddleware
 
 
@@ -180,3 +184,173 @@ class TestDefaultIsRetryable:
         """Asserts that _default_is_retryable is accessible via an instance."""
         middleware = RetryMiddleware(client=MockProvider())
         assert middleware._default_is_retryable(ProviderError("err", 500)) is True
+
+
+class TestSendRequest:
+    """RetryMiddleware.send_request — retry loop, backoff, and exhaustion."""
+
+    @pytest.mark.asyncio
+    async def test_success_on_first_attempt(self) -> None:
+        """Asserts that a successful first attempt returns without any retry."""
+        from mada_modelkit._types import AgentRequest, AgentResponse
+
+        expected = AgentResponse(content="ok", model="m", input_tokens=1, output_tokens=1)
+        provider = MockProvider(responses=[expected])
+        middleware = RetryMiddleware(client=provider, max_retries=3)
+
+        result = await middleware.send_request(AgentRequest(prompt="hi"))
+        assert result is expected
+        assert provider.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retryable_error_retried_until_success(self) -> None:
+        """Asserts that a retryable error is retried and returns once provider succeeds."""
+        from mada_modelkit._types import AgentRequest, AgentResponse
+
+        success = AgentResponse(content="ok", model="m", input_tokens=1, output_tokens=1)
+        provider = MockProvider(
+            errors=[ProviderError("server error", 500), ProviderError("server error", 500)],
+            responses=[success],
+        )
+        with patch("mada_modelkit.middleware.retry.asyncio.sleep", new_callable=AsyncMock):
+            middleware = RetryMiddleware(client=provider, max_retries=3)
+            result = await middleware.send_request(AgentRequest(prompt="hi"))
+
+        assert result is success
+        assert provider.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_error_raised_immediately(self) -> None:
+        """Asserts that a non-retryable error is re-raised on the first attempt."""
+        from mada_modelkit._types import AgentRequest
+
+        err = ProviderError("bad request", 400)
+        provider = MockProvider(errors=[err])
+        middleware = RetryMiddleware(client=provider, max_retries=3)
+
+        with pytest.raises(ProviderError) as exc_info:
+            await middleware.send_request(AgentRequest(prompt="hi"))
+
+        assert exc_info.value is err
+        assert provider.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_not_wrapped_in_retry_exhausted(self) -> None:
+        """Asserts that non-retryable errors are NOT wrapped in RetryExhaustedError."""
+        from mada_modelkit._types import AgentRequest
+
+        provider = MockProvider(errors=[ProviderError("forbidden", 403)])
+        middleware = RetryMiddleware(client=provider, max_retries=3)
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(AgentRequest(prompt="hi"))
+
+    @pytest.mark.asyncio
+    async def test_exhaustion_raises_retry_exhausted_error(self) -> None:
+        """Asserts that RetryExhaustedError is raised when all retries are consumed."""
+        from mada_modelkit._types import AgentRequest
+
+        provider = MockProvider(errors=[ProviderError("err", 500)] * 4)
+        with patch("mada_modelkit.middleware.retry.asyncio.sleep", new_callable=AsyncMock):
+            middleware = RetryMiddleware(client=provider, max_retries=3)
+            with pytest.raises(RetryExhaustedError):
+                await middleware.send_request(AgentRequest(prompt="hi"))
+
+        assert provider.call_count == 4  # 1 initial + 3 retries
+
+    @pytest.mark.asyncio
+    async def test_retry_exhausted_stores_last_error(self) -> None:
+        """Asserts that RetryExhaustedError.last_error is the final caught exception."""
+        from mada_modelkit._types import AgentRequest
+
+        last = ProviderError("last error", 503)
+        provider = MockProvider(
+            errors=[ProviderError("first", 500), ProviderError("second", 502), last]
+        )
+        with patch("mada_modelkit.middleware.retry.asyncio.sleep", new_callable=AsyncMock):
+            middleware = RetryMiddleware(client=provider, max_retries=2)
+            with pytest.raises(RetryExhaustedError) as exc_info:
+                await middleware.send_request(AgentRequest(prompt="hi"))
+
+        assert exc_info.value.last_error is last
+
+    @pytest.mark.asyncio
+    async def test_backoff_sleep_called_with_correct_delays(self) -> None:
+        """Asserts that asyncio.sleep is called with backoff_base * 2**attempt."""
+        from mada_modelkit._types import AgentRequest
+
+        provider = MockProvider(errors=[ProviderError("err", 500)] * 4)
+        mock_sleep = AsyncMock()
+        with patch("mada_modelkit.middleware.retry.asyncio.sleep", mock_sleep):
+            middleware = RetryMiddleware(client=provider, max_retries=3, backoff_base=1.0)
+            with pytest.raises(RetryExhaustedError):
+                await middleware.send_request(AgentRequest(prompt="hi"))
+
+        assert mock_sleep.call_count == 3
+        calls = [c.args[0] for c in mock_sleep.call_args_list]
+        assert calls == [1.0, 2.0, 4.0]  # 1.0*2^0, 1.0*2^1, 1.0*2^2
+
+    @pytest.mark.asyncio
+    async def test_backoff_uses_backoff_base(self) -> None:
+        """Asserts that the backoff_base multiplier scales sleep durations correctly."""
+        from mada_modelkit._types import AgentRequest
+
+        provider = MockProvider(errors=[ProviderError("err", 500)] * 3)
+        mock_sleep = AsyncMock()
+        with patch("mada_modelkit.middleware.retry.asyncio.sleep", mock_sleep):
+            middleware = RetryMiddleware(client=provider, max_retries=2, backoff_base=0.5)
+            with pytest.raises(RetryExhaustedError):
+                await middleware.send_request(AgentRequest(prompt="hi"))
+
+        calls = [c.args[0] for c in mock_sleep.call_args_list]
+        assert calls == [0.5, 1.0]  # 0.5*2^0, 0.5*2^1
+
+    @pytest.mark.asyncio
+    async def test_max_retries_zero_means_single_attempt(self) -> None:
+        """Asserts that max_retries=0 results in exactly one attempt with no sleep."""
+        from mada_modelkit._types import AgentRequest
+
+        provider = MockProvider(errors=[ProviderError("err", 500)])
+        mock_sleep = AsyncMock()
+        with patch("mada_modelkit.middleware.retry.asyncio.sleep", mock_sleep):
+            middleware = RetryMiddleware(client=provider, max_retries=0)
+            with pytest.raises(RetryExhaustedError):
+                await middleware.send_request(AgentRequest(prompt="hi"))
+
+        assert provider.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_custom_is_retryable_overrides_default(self) -> None:
+        """Asserts that a custom is_retryable predicate controls retry decisions."""
+        from mada_modelkit._types import AgentRequest, AgentResponse
+
+        # Custom predicate: retry only on ValueError (not the default ProviderError logic)
+        success = AgentResponse(content="ok", model="m", input_tokens=1, output_tokens=1)
+        provider = MockProvider(errors=[ValueError("transient")], responses=[success])
+
+        with patch("mada_modelkit.middleware.retry.asyncio.sleep", new_callable=AsyncMock):
+            middleware = RetryMiddleware(
+                client=provider,
+                max_retries=1,
+                is_retryable=lambda exc: isinstance(exc, ValueError),
+            )
+            result = await middleware.send_request(AgentRequest(prompt="hi"))
+
+        assert result is success
+        assert provider.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_sleep_after_final_attempt(self) -> None:
+        """Asserts that asyncio.sleep is not called after the last failed attempt."""
+        from mada_modelkit._types import AgentRequest
+
+        # max_retries=2 → 3 total attempts → 2 sleeps (after attempt 0 and 1, not after 2)
+        provider = MockProvider(errors=[ProviderError("err", 500)] * 3)
+        mock_sleep = AsyncMock()
+        with patch("mada_modelkit.middleware.retry.asyncio.sleep", mock_sleep):
+            middleware = RetryMiddleware(client=provider, max_retries=2)
+            with pytest.raises(RetryExhaustedError):
+                await middleware.send_request(AgentRequest(prompt="hi"))
+
+        assert mock_sleep.call_count == 2  # only between attempts, not after last

@@ -6,11 +6,12 @@ configurable exponential backoff. Zero external dependencies — stdlib only.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import AsyncIterator
 
 from mada_modelkit._base import BaseAgentClient
-from mada_modelkit._errors import ProviderError
+from mada_modelkit._errors import ProviderError, RetryExhaustedError
 from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
 
 __all__ = ["RetryMiddleware"]
@@ -60,8 +61,29 @@ class RetryMiddleware(BaseAgentClient):
         return False
 
     async def send_request(self, request: AgentRequest) -> AgentResponse:
-        """Delegate to the wrapped client (full retry logic added in task 2.1.3)."""
-        return await self._client.send_request(request)
+        """Execute the request, retrying on retryable failures with exponential backoff.
+
+        Attempts the request up to max_retries + 1 times total. Between each
+        retry, sleeps for backoff_base * 2 ** attempt seconds. Non-retryable
+        exceptions are re-raised immediately. When all retries are exhausted,
+        raises RetryExhaustedError with the last caught exception as last_error.
+        """
+        is_retryable = self._is_retryable if self._is_retryable is not None else self._default_is_retryable
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                return await self._client.send_request(request)
+            except Exception as exc:
+                last_exc = exc
+                if not is_retryable(exc):
+                    raise
+                if attempt < self._max_retries:
+                    await asyncio.sleep(self._backoff_base * 2**attempt)
+        assert last_exc is not None
+        raise RetryExhaustedError(
+            f"Request failed after {self._max_retries + 1} attempt(s): {last_exc}",
+            last_error=last_exc,
+        ) from last_exc
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
         """Delegate streaming to the wrapped client (retry logic added in task 2.1.4)."""
