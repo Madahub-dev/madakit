@@ -1,5 +1,5 @@
 """Tests for CircuitBreakerMiddleware constructor, state machine, send_request,
-and send_request_stream (tasks 2.2.1–2.2.4).
+send_request_stream, and recovery probing (tasks 2.2.1–2.2.5).
 
 Covers: attribute storage, default values, initial state fields
 (_failure_count, _state, _last_failure_time, _lock), BaseAgentClient
@@ -7,7 +7,9 @@ inheritance, semaphore absence, state machine transitions (closed→open at
 threshold, open→half-open after timeout, half-open→closed on success,
 half-open→open on failure), send_request circuit logic (closed passthrough,
 open raises CircuitOpenError, half-open health-check probe then request),
-and send_request_stream with the same closed/open/half-open circuit logic.
+send_request_stream with the same closed/open/half-open circuit logic, and
+recovery probing (health_check call count, not called in wrong states,
+exception propagation without failure recording).
 """
 
 from __future__ import annotations
@@ -535,3 +537,152 @@ class TestSendRequestStream:
         async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
             pass
         assert cb._state == "closed"
+
+
+# ---------------------------------------------------------------------------
+# Health-check probing helpers
+# ---------------------------------------------------------------------------
+
+
+class _CountingHealthCheckProvider(MockProvider):
+    """MockProvider that counts health_check invocations and returns a configurable status."""
+
+    def __init__(self, healthy: bool = True, **kwargs: object) -> None:
+        """Initialise with a healthy flag; health_check_calls starts at zero."""
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.health_check_calls: int = 0
+        self._healthy = healthy
+
+    async def health_check(self) -> bool:
+        """Increment health_check_calls and return the configured health status."""
+        self.health_check_calls += 1
+        return self._healthy
+
+
+class _RaisingHealthCheckProvider(MockProvider):
+    """MockProvider whose health_check raises a caller-supplied exception."""
+
+    def __init__(self, error: Exception) -> None:
+        """Initialise with the exception to raise from health_check."""
+        super().__init__()
+        self._error = error
+
+    async def health_check(self) -> bool:
+        """Raise the stored error unconditionally."""
+        raise self._error
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestHealthCheckProbing:
+    """CircuitBreakerMiddleware recovery probing — health_check call count and exception handling."""
+
+    # -- send_request ---------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_health_check_called_once_on_half_open_send_request(self) -> None:
+        """Asserts that health_check is called exactly once per half-open send_request."""
+        provider = _CountingHealthCheckProvider()
+        cb = CircuitBreakerMiddleware(client=provider)
+        cb._state = "half-open"
+        await cb.send_request(AgentRequest(prompt="hi"))
+        assert provider.health_check_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_health_check_not_called_when_closed_send_request(self) -> None:
+        """Asserts that health_check is not called when the circuit is closed."""
+        provider = _CountingHealthCheckProvider()
+        cb = CircuitBreakerMiddleware(client=provider)
+        await cb.send_request(AgentRequest(prompt="hi"))
+        assert provider.health_check_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_health_check_not_called_when_open_send_request(self) -> None:
+        """Asserts that health_check is not called when the circuit is open."""
+        provider = _CountingHealthCheckProvider()
+        cb = CircuitBreakerMiddleware(client=provider)
+        cb._state = "open"
+        cb._last_failure_time = time.monotonic()
+        with pytest.raises(CircuitOpenError):
+            await cb.send_request(AgentRequest(prompt="hi"))
+        assert provider.health_check_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_health_check_exception_propagates_send_request(self) -> None:
+        """Asserts that an exception raised by health_check propagates out of send_request."""
+        err = RuntimeError("health check network failure")
+        cb = CircuitBreakerMiddleware(client=_RaisingHealthCheckProvider(error=err))
+        cb._state = "half-open"
+        with pytest.raises(RuntimeError, match="health check network failure"):
+            await cb.send_request(AgentRequest(prompt="hi"))
+
+    @pytest.mark.asyncio
+    async def test_health_check_exception_does_not_record_failure_send_request(self) -> None:
+        """Asserts that health_check raising does not increment _failure_count."""
+        err = RuntimeError("transient probe error")
+        cb = CircuitBreakerMiddleware(
+            client=_RaisingHealthCheckProvider(error=err), failure_threshold=10
+        )
+        cb._state = "half-open"
+        with pytest.raises(RuntimeError):
+            await cb.send_request(AgentRequest(prompt="hi"))
+        assert cb._failure_count == 0
+
+    # -- send_request_stream --------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_health_check_called_once_on_half_open_send_request_stream(self) -> None:
+        """Asserts that health_check is called exactly once per half-open send_request_stream."""
+        provider = _CountingHealthCheckProvider()
+        cb = CircuitBreakerMiddleware(client=provider)
+        cb._state = "half-open"
+        async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+            pass
+        assert provider.health_check_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_health_check_not_called_when_closed_send_request_stream(self) -> None:
+        """Asserts that health_check is not called when the circuit is closed (stream)."""
+        provider = _CountingHealthCheckProvider()
+        cb = CircuitBreakerMiddleware(client=provider)
+        async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+            pass
+        assert provider.health_check_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_health_check_not_called_when_open_send_request_stream(self) -> None:
+        """Asserts that health_check is not called when the circuit is open (stream)."""
+        provider = _CountingHealthCheckProvider()
+        cb = CircuitBreakerMiddleware(client=provider)
+        cb._state = "open"
+        cb._last_failure_time = time.monotonic()
+        with pytest.raises(CircuitOpenError):
+            async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+        assert provider.health_check_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_health_check_exception_propagates_send_request_stream(self) -> None:
+        """Asserts that an exception raised by health_check propagates through the stream."""
+        err = RuntimeError("health check network failure")
+        cb = CircuitBreakerMiddleware(client=_RaisingHealthCheckProvider(error=err))
+        cb._state = "half-open"
+        with pytest.raises(RuntimeError, match="health check network failure"):
+            async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_health_check_exception_does_not_record_failure_send_request_stream(self) -> None:
+        """Asserts that health_check raising does not increment _failure_count (stream)."""
+        err = RuntimeError("transient probe error")
+        cb = CircuitBreakerMiddleware(
+            client=_RaisingHealthCheckProvider(error=err), failure_threshold=10
+        )
+        cb._state = "half-open"
+        with pytest.raises(RuntimeError):
+            async for _ in cb.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+        assert cb._failure_count == 0
