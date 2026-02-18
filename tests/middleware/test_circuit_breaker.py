@@ -1,13 +1,19 @@
-"""Tests for CircuitBreakerMiddleware constructor (task 2.2.1).
+"""Tests for CircuitBreakerMiddleware constructor and state machine (tasks 2.2.1–2.2.2).
 
 Covers: attribute storage, default values, initial state fields
 (_failure_count, _state, _last_failure_time, _lock), BaseAgentClient
-inheritance, and semaphore absence.
+inheritance, semaphore absence, and state machine transitions
+(closed→open at threshold, open→half-open after timeout, half-open→closed
+on success, half-open→open on failure).
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
+from unittest.mock import patch
+
+import pytest
 
 from helpers import MockProvider
 from mada_modelkit._base import BaseAgentClient
@@ -98,3 +104,134 @@ class TestCircuitBreakerConstructor:
         inner = RetryMiddleware(client=MockProvider())
         outer = CircuitBreakerMiddleware(client=inner)
         assert outer._client is inner
+
+
+class TestStateMachine:
+    """CircuitBreakerMiddleware state machine — _record_failure, _record_success, _check_state."""
+
+    @pytest.mark.asyncio
+    async def test_record_failure_increments_count(self) -> None:
+        """Asserts that _record_failure increments _failure_count by one."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), failure_threshold=5)
+        await cb._record_failure()
+        assert cb._failure_count == 1
+
+    @pytest.mark.asyncio
+    async def test_closed_stays_closed_below_threshold(self) -> None:
+        """Asserts that state remains closed when failure count is below threshold."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), failure_threshold=3)
+        await cb._record_failure()
+        await cb._record_failure()
+        assert cb._state == "closed"
+
+    @pytest.mark.asyncio
+    async def test_closed_transitions_to_open_at_threshold(self) -> None:
+        """Asserts that reaching failure_threshold transitions the circuit to open."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), failure_threshold=3)
+        for _ in range(3):
+            await cb._record_failure()
+        assert cb._state == "open"
+
+    @pytest.mark.asyncio
+    async def test_last_failure_time_recorded_on_open(self) -> None:
+        """Asserts that _last_failure_time is set when the circuit opens."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), failure_threshold=1)
+        before = time.monotonic()
+        await cb._record_failure()
+        assert cb._last_failure_time is not None
+        assert cb._last_failure_time >= before
+
+    @pytest.mark.asyncio
+    async def test_failure_count_increments_beyond_threshold(self) -> None:
+        """Asserts that _failure_count keeps incrementing after the circuit opens."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), failure_threshold=2)
+        for _ in range(4):
+            await cb._record_failure()
+        assert cb._failure_count == 4
+        assert cb._state == "open"
+
+    @pytest.mark.asyncio
+    async def test_record_success_transitions_to_closed(self) -> None:
+        """Asserts that _record_success sets state to closed."""
+        cb = CircuitBreakerMiddleware(client=MockProvider())
+        cb._state = "half-open"
+        await cb._record_success()
+        assert cb._state == "closed"
+
+    @pytest.mark.asyncio
+    async def test_record_success_resets_failure_count(self) -> None:
+        """Asserts that _record_success resets _failure_count to zero."""
+        cb = CircuitBreakerMiddleware(client=MockProvider())
+        cb._failure_count = 4
+        await cb._record_success()
+        assert cb._failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_check_state_returns_closed_when_closed(self) -> None:
+        """Asserts that _check_state returns 'closed' in the closed state."""
+        cb = CircuitBreakerMiddleware(client=MockProvider())
+        assert await cb._check_state() == "closed"
+
+    @pytest.mark.asyncio
+    async def test_check_state_returns_open_before_timeout(self) -> None:
+        """Asserts that _check_state returns 'open' when recovery_timeout has not elapsed."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), recovery_timeout=60.0)
+        cb._state = "open"
+        cb._last_failure_time = time.monotonic()
+        assert await cb._check_state() == "open"
+
+    @pytest.mark.asyncio
+    async def test_open_transitions_to_half_open_after_timeout(self) -> None:
+        """Asserts that _check_state transitions open→half-open after recovery_timeout."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), recovery_timeout=30.0)
+        cb._state = "open"
+        cb._last_failure_time = time.monotonic() - 31.0
+        state = await cb._check_state()
+        assert state == "half-open"
+        assert cb._state == "half-open"
+
+    @pytest.mark.asyncio
+    async def test_open_to_half_open_uses_monotonic_clock(self) -> None:
+        """Asserts that the timeout check uses time.monotonic via the patched value."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), recovery_timeout=10.0)
+        cb._state = "open"
+        cb._last_failure_time = 100.0
+        with patch("mada_modelkit.middleware.circuit_breaker.time.monotonic", return_value=111.0):
+            state = await cb._check_state()
+        assert state == "half-open"
+
+    @pytest.mark.asyncio
+    async def test_open_stays_open_exactly_at_timeout_boundary(self) -> None:
+        """Asserts that state stays open when elapsed equals exactly recovery_timeout."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), recovery_timeout=10.0)
+        cb._state = "open"
+        cb._last_failure_time = 100.0
+        # elapsed = 109.9 < 10.0 → still open
+        with patch("mada_modelkit.middleware.circuit_breaker.time.monotonic", return_value=109.9):
+            state = await cb._check_state()
+        assert state == "open"
+
+    @pytest.mark.asyncio
+    async def test_check_state_returns_half_open_unchanged(self) -> None:
+        """Asserts that _check_state returns 'half-open' without altering half-open state."""
+        cb = CircuitBreakerMiddleware(client=MockProvider())
+        cb._state = "half-open"
+        assert await cb._check_state() == "half-open"
+
+    @pytest.mark.asyncio
+    async def test_half_open_failure_immediately_reopens_circuit(self) -> None:
+        """Asserts that any failure in half-open state transitions directly to open."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), failure_threshold=10)
+        cb._state = "half-open"
+        await cb._record_failure()
+        assert cb._state == "open"
+
+    @pytest.mark.asyncio
+    async def test_half_open_failure_records_failure_time(self) -> None:
+        """Asserts that reopening from half-open updates _last_failure_time."""
+        cb = CircuitBreakerMiddleware(client=MockProvider(), failure_threshold=10)
+        cb._state = "half-open"
+        before = time.monotonic()
+        await cb._record_failure()
+        assert cb._last_failure_time is not None
+        assert cb._last_failure_time >= before

@@ -8,6 +8,7 @@ states with timeout-based recovery. Zero external dependencies — stdlib only.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import AsyncIterator
 
 from mada_modelkit._base import BaseAgentClient
@@ -41,6 +42,37 @@ class CircuitBreakerMiddleware(BaseAgentClient):
         self._state: str = "closed"
         self._last_failure_time: float | None = None
         self._lock: asyncio.Lock = asyncio.Lock()
+
+    async def _record_failure(self) -> None:
+        """Record a failure and open the circuit when the threshold is reached.
+
+        In half-open state any single failure immediately reopens the circuit.
+        In closed state the circuit opens once _failure_count reaches _failure_threshold.
+        Always records _last_failure_time when transitioning to open.
+        """
+        async with self._lock:
+            self._failure_count += 1
+            if self._state == "half-open" or self._failure_count >= self._failure_threshold:
+                self._state = "open"
+                self._last_failure_time = time.monotonic()
+
+    async def _record_success(self) -> None:
+        """Record a success, reset the failure count, and close the circuit."""
+        async with self._lock:
+            self._failure_count = 0
+            self._state = "closed"
+
+    async def _check_state(self) -> str:
+        """Return the effective current state, applying the open→half-open timeout transition.
+
+        If the circuit is open and recovery_timeout seconds have elapsed since the
+        last failure, the state advances to half-open so a probe can be attempted.
+        """
+        async with self._lock:
+            if self._state == "open" and self._last_failure_time is not None:
+                if time.monotonic() - self._last_failure_time >= self._recovery_timeout:
+                    self._state = "half-open"
+            return self._state
 
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Delegate to the wrapped client (circuit logic added in task 2.2.3)."""
