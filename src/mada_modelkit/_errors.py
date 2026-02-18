@@ -23,3 +23,7 @@ class ProviderError(AgentError):
 
 class MiddlewareError(AgentError):
     """Base class for errors raised by middleware layers."""
+
+
+class CircuitOpenError(MiddlewareError):
+    """Raised when a request is rejected because the circuit breaker is open."""

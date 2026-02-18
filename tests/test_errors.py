@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._errors import AgentError, MiddlewareError, ProviderError
+from mada_modelkit._errors import AgentError, CircuitOpenError, MiddlewareError, ProviderError
 
 
 class TestAgentError:
@@ -117,3 +117,43 @@ class TestMiddlewareError:
     def test_not_a_provider_error(self) -> None:
         """MiddlewareError is not a subclass of ProviderError."""
         assert not issubclass(MiddlewareError, ProviderError)
+
+
+class TestCircuitOpenError:
+    """Tests for the CircuitOpenError exception."""
+
+    def test_is_middleware_error(self) -> None:
+        """CircuitOpenError is a subclass of MiddlewareError."""
+        assert issubclass(CircuitOpenError, MiddlewareError)
+
+    def test_is_agent_error(self) -> None:
+        """CircuitOpenError is a subclass of AgentError."""
+        assert issubclass(CircuitOpenError, AgentError)
+
+    def test_is_exception(self) -> None:
+        """CircuitOpenError is a subclass of Exception."""
+        assert issubclass(CircuitOpenError, Exception)
+
+    def test_message_preserved(self) -> None:
+        """The error message is accessible via str()."""
+        err = CircuitOpenError("circuit is open")
+        assert str(err) == "circuit is open"
+
+    def test_can_be_raised(self) -> None:
+        """CircuitOpenError can be raised and caught directly."""
+        with pytest.raises(CircuitOpenError):
+            raise CircuitOpenError("open")
+
+    def test_caught_as_middleware_error(self) -> None:
+        """CircuitOpenError is caught by a MiddlewareError handler."""
+        with pytest.raises(MiddlewareError):
+            raise CircuitOpenError("open")
+
+    def test_caught_as_agent_error(self) -> None:
+        """CircuitOpenError is caught by an AgentError handler."""
+        with pytest.raises(AgentError):
+            raise CircuitOpenError("open")
+
+    def test_not_a_provider_error(self) -> None:
+        """CircuitOpenError is not a subclass of ProviderError."""
+        assert not issubclass(CircuitOpenError, ProviderError)
