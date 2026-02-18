@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mada_modelkit._types import AgentRequest, AgentResponse, Attachment, StreamChunk
+from mada_modelkit._types import AgentRequest, AgentResponse, Attachment, StreamChunk, TrackingStats
 
 
 class TestAttachment:
@@ -194,3 +194,76 @@ class TestStreamChunk:
         c1 = StreamChunk(delta="hi")
         c2 = StreamChunk(delta="bye")
         assert c1 != c2
+
+
+class TestTrackingStats:
+    def test_construction_defaults(self) -> None:
+        stats = TrackingStats()
+        assert stats.total_requests == 0
+        assert stats.total_input_tokens == 0
+        assert stats.total_output_tokens == 0
+        assert stats.total_inference_ms == 0.0
+        assert stats.total_ttft_ms == 0.0
+        assert stats.total_cost_usd is None
+
+    def test_construction_with_values(self) -> None:
+        stats = TrackingStats(
+            total_requests=5,
+            total_input_tokens=100,
+            total_output_tokens=200,
+            total_inference_ms=1500.0,
+            total_ttft_ms=80.0,
+            total_cost_usd=0.003,
+        )
+        assert stats.total_requests == 5
+        assert stats.total_input_tokens == 100
+        assert stats.total_output_tokens == 200
+        assert stats.total_inference_ms == 1500.0
+        assert stats.total_ttft_ms == 80.0
+        assert stats.total_cost_usd == 0.003
+
+    def test_reset_returns_snapshot(self) -> None:
+        stats = TrackingStats(
+            total_requests=3,
+            total_input_tokens=50,
+            total_output_tokens=100,
+            total_inference_ms=900.0,
+            total_ttft_ms=45.0,
+            total_cost_usd=0.001,
+        )
+        snapshot = stats.reset()
+        assert snapshot.total_requests == 3
+        assert snapshot.total_input_tokens == 50
+        assert snapshot.total_output_tokens == 100
+        assert snapshot.total_inference_ms == 900.0
+        assert snapshot.total_ttft_ms == 45.0
+        assert snapshot.total_cost_usd == 0.001
+
+    def test_reset_zeros_original(self) -> None:
+        stats = TrackingStats(
+            total_requests=3,
+            total_input_tokens=50,
+            total_output_tokens=100,
+            total_inference_ms=900.0,
+            total_ttft_ms=45.0,
+            total_cost_usd=0.001,
+        )
+        stats.reset()
+        assert stats.total_requests == 0
+        assert stats.total_input_tokens == 0
+        assert stats.total_output_tokens == 0
+        assert stats.total_inference_ms == 0.0
+        assert stats.total_ttft_ms == 0.0
+        assert stats.total_cost_usd is None
+
+    def test_reset_snapshot_is_independent(self) -> None:
+        stats = TrackingStats(total_requests=7)
+        snapshot = stats.reset()
+        stats.total_requests = 99
+        assert snapshot.total_requests == 7
+
+    def test_reset_on_defaults_returns_zero_snapshot(self) -> None:
+        stats = TrackingStats()
+        snapshot = stats.reset()
+        assert snapshot.total_requests == 0
+        assert snapshot.total_cost_usd is None

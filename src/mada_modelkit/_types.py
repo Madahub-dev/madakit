@@ -48,3 +48,33 @@ class StreamChunk:
     delta: str
     is_final: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TrackingStats:
+    """Aggregate statistics collected by TrackingMiddleware."""
+
+    total_requests: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_inference_ms: float = 0.0
+    total_ttft_ms: float = 0.0
+    total_cost_usd: float | None = None
+
+    def reset(self) -> TrackingStats:
+        """Return a snapshot of current stats, then zero all counters."""
+        snapshot = TrackingStats(
+            total_requests=self.total_requests,
+            total_input_tokens=self.total_input_tokens,
+            total_output_tokens=self.total_output_tokens,
+            total_inference_ms=self.total_inference_ms,
+            total_ttft_ms=self.total_ttft_ms,
+            total_cost_usd=self.total_cost_usd,
+        )
+        self.total_requests = 0
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.total_inference_ms = 0.0
+        self.total_ttft_ms = 0.0
+        self.total_cost_usd = None
+        return snapshot
