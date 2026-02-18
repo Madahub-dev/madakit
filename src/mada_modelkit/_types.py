@@ -39,3 +39,12 @@ class AgentResponse:
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
+
+
+@dataclass
+class StreamChunk:
+    """A single chunk yielded during a streaming response."""
+
+    delta: str
+    is_final: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)

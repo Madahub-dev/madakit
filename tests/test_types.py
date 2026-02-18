@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mada_modelkit._types import AgentRequest, AgentResponse, Attachment
+from mada_modelkit._types import AgentRequest, AgentResponse, Attachment, StreamChunk
 
 
 class TestAttachment:
@@ -152,3 +152,45 @@ class TestAgentResponse:
         r1 = AgentResponse(content="Hi", model="m", input_tokens=10, output_tokens=5)
         r2 = AgentResponse(content="Bye", model="m", input_tokens=10, output_tokens=5)
         assert r1 != r2
+
+
+class TestStreamChunk:
+    def test_construction(self) -> None:
+        chunk = StreamChunk(delta="hello")
+        assert chunk.delta == "hello"
+
+    def test_default_is_final_false(self) -> None:
+        chunk = StreamChunk(delta="x")
+        assert chunk.is_final is False
+
+    def test_default_metadata_empty_dict(self) -> None:
+        chunk = StreamChunk(delta="x")
+        assert chunk.metadata == {}
+
+    def test_is_final_true(self) -> None:
+        chunk = StreamChunk(delta="", is_final=True)
+        assert chunk.is_final is True
+
+    def test_delta_empty_string(self) -> None:
+        chunk = StreamChunk(delta="")
+        assert chunk.delta == ""
+
+    def test_metadata_set(self) -> None:
+        chunk = StreamChunk(delta="tok", metadata={"ttft_ms": 42.0})
+        assert chunk.metadata["ttft_ms"] == 42.0
+
+    def test_metadata_default_factory_independent(self) -> None:
+        c1 = StreamChunk(delta="a")
+        c2 = StreamChunk(delta="b")
+        c1.metadata["key"] = "val"
+        assert c2.metadata == {}
+
+    def test_equality(self) -> None:
+        c1 = StreamChunk(delta="hi", is_final=True)
+        c2 = StreamChunk(delta="hi", is_final=True)
+        assert c1 == c2
+
+    def test_inequality(self) -> None:
+        c1 = StreamChunk(delta="hi")
+        c2 = StreamChunk(delta="bye")
+        assert c1 != c2
