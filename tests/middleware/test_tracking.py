@@ -1,11 +1,12 @@
-"""Tests for TrackingMiddleware constructor and send_request (tasks 2.4.1–2.4.2).
+"""Tests for TrackingMiddleware (tasks 2.4.1–2.4.5).
 
-Covers: client storage, default cost_fn (None), custom cost_fn storage,
-_stats initialised as a fresh TrackingStats instance (all counters at zero,
-total_cost_usd=None), BaseAgentClient inheritance, semaphore absence,
-per-instance stats isolation, stub delegation to the wrapped client,
-middleware composition, send_request timing via perf_counter, token
-accumulation, cost_fn invocation and accumulation, and exception safety.
+Covers: constructor attribute storage, initial stats state, BaseAgentClient
+inheritance, semaphore absence, per-instance stats isolation, middleware
+composition, send_request timing and token accumulation, cost_fn invocation
+and accumulation, send_request_stream TTFT measurement and inference timing,
+token accumulation from final-chunk metadata, exception safety, stats
+property identity, stats.reset() interaction, module exports, virtual method
+defaults, and end-to-end integration scenarios.
 """
 
 from __future__ import annotations
@@ -441,3 +442,122 @@ class TestSendRequestStream:
         middleware = TrackingMiddleware(client=_MultiChunkProvider(chunks_in))
         chunks_out = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
         assert chunks_out[0].is_final is True
+
+
+class TestModuleExports:
+    """Module-level exports — __all__ and public name availability."""
+
+    def test_all_is_defined(self) -> None:
+        """Asserts that __all__ is defined in the tracking module."""
+        import mada_modelkit.middleware.tracking as mod
+        assert hasattr(mod, "__all__")
+
+    def test_tracking_middleware_in_all(self) -> None:
+        """Asserts that 'TrackingMiddleware' is listed in __all__."""
+        import mada_modelkit.middleware.tracking as mod
+        assert "TrackingMiddleware" in mod.__all__
+
+    def test_tracking_middleware_importable(self) -> None:
+        """Asserts that TrackingMiddleware can be imported from the tracking module."""
+        from mada_modelkit.middleware.tracking import TrackingMiddleware as TM
+        assert TM is TrackingMiddleware
+
+
+class TestVirtualMethodDefaults:
+    """TrackingMiddleware inherited virtual methods — health_check, cancel, close."""
+
+    @pytest.mark.asyncio
+    async def test_health_check_returns_true(self) -> None:
+        """Asserts that health_check returns True (inherited default)."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        assert await middleware.health_check() is True
+
+    @pytest.mark.asyncio
+    async def test_cancel_is_no_op(self) -> None:
+        """Asserts that cancel() completes without raising."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        await middleware.cancel()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_close_is_no_op(self) -> None:
+        """Asserts that close() completes without raising."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        await middleware.close()  # must not raise
+
+
+class TestIntegration:
+    """TrackingMiddleware end-to-end — mixed calls, reset, stacking, and context manager."""
+
+    @pytest.mark.asyncio
+    async def test_mixed_send_request_and_stream_accumulate_all_stats(self) -> None:
+        """Asserts that send_request and send_request_stream both contribute to stats."""
+        resp = AgentResponse(content="r", model="m", input_tokens=3, output_tokens=2)
+        stream_chunks = [StreamChunk(delta="s", is_final=True, metadata={"input_tokens": 1, "output_tokens": 4})]
+        provider_seq = MockProvider(responses=[resp])
+        middleware = TrackingMiddleware(client=provider_seq)
+        await middleware.send_request(AgentRequest(prompt="a"))
+        # override client for stream call
+        middleware._client = _MultiChunkProvider(stream_chunks)
+        async for _ in middleware.send_request_stream(AgentRequest(prompt="b")):
+            pass
+        assert middleware.stats.total_requests == 1       # only send_request increments
+        assert middleware.stats.total_input_tokens == 4   # 3 + 1
+        assert middleware.stats.total_output_tokens == 6  # 2 + 4
+        assert middleware.stats.total_inference_ms > 0.0
+        assert middleware.stats.total_ttft_ms > 0.0
+
+    @pytest.mark.asyncio
+    async def test_stats_reset_returns_snapshot_with_accumulated_values(self) -> None:
+        """Asserts that reset() returns a TrackingStats with the pre-reset counters."""
+        resp = AgentResponse(content="x", model="m", input_tokens=5, output_tokens=3)
+        middleware = TrackingMiddleware(
+            client=MockProvider(responses=[resp]),
+            cost_fn=lambda r: 0.02,
+        )
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        snapshot = middleware.stats.reset()
+        assert snapshot.total_requests == 1
+        assert snapshot.total_input_tokens == 5
+        assert snapshot.total_output_tokens == 3
+        assert snapshot.total_cost_usd == pytest.approx(0.02)
+
+    @pytest.mark.asyncio
+    async def test_stats_reset_zeroes_live_counters(self) -> None:
+        """Asserts that after reset(), stats shows zeroed counters."""
+        middleware = TrackingMiddleware(client=MockProvider(), cost_fn=lambda r: 0.01)
+        await middleware.send_request(AgentRequest(prompt="hi"))
+        middleware.stats.reset()
+        assert middleware.stats.total_requests == 0
+        assert middleware.stats.total_input_tokens == 0
+        assert middleware.stats.total_output_tokens == 0
+        assert middleware.stats.total_inference_ms == 0.0
+        assert middleware.stats.total_ttft_ms == 0.0
+        assert middleware.stats.total_cost_usd is None
+
+    @pytest.mark.asyncio
+    async def test_accumulation_continues_from_zero_after_reset(self) -> None:
+        """Asserts that new requests after reset() accumulate from zero."""
+        middleware = TrackingMiddleware(client=MockProvider())
+        await middleware.send_request(AgentRequest(prompt="first"))
+        middleware.stats.reset()
+        await middleware.send_request(AgentRequest(prompt="second"))
+        assert middleware.stats.total_requests == 1
+
+    @pytest.mark.asyncio
+    async def test_stacked_with_caching_middleware(self) -> None:
+        """Asserts that TrackingMiddleware correctly wraps CachingMiddleware."""
+        from mada_modelkit.middleware.cache import CachingMiddleware
+
+        inner = CachingMiddleware(client=MockProvider())
+        tracking = TrackingMiddleware(client=inner)
+        await tracking.send_request(AgentRequest(prompt="cached"))
+        await tracking.send_request(AgentRequest(prompt="cached"))
+        # Both calls pass through TrackingMiddleware; second is served from cache
+        assert tracking.stats.total_requests == 2
+
+    @pytest.mark.asyncio
+    async def test_context_manager_usage(self) -> None:
+        """Asserts that TrackingMiddleware works as an async context manager."""
+        async with TrackingMiddleware(client=MockProvider()) as middleware:
+            await middleware.send_request(AgentRequest(prompt="hi"))
+            assert middleware.stats.total_requests == 1
