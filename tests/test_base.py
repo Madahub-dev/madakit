@@ -239,3 +239,54 @@ class TestGenerateStream:
         client = _ConcreteClient()
         chunks = [c async for c in client.generate_stream("hi")]
         assert chunks[-1].is_final is True
+
+
+class TestVirtualMethods:
+    """Tests for health_check, cancel, and close virtual defaults."""
+
+    @pytest.mark.asyncio
+    async def test_health_check_returns_true(self) -> None:
+        """Default health_check returns True."""
+        assert await _ConcreteClient().health_check() is True
+
+    @pytest.mark.asyncio
+    async def test_health_check_return_type_is_bool(self) -> None:
+        """Default health_check return value is a bool."""
+        result = await _ConcreteClient().health_check()
+        assert isinstance(result, bool)
+
+    @pytest.mark.asyncio
+    async def test_cancel_returns_none(self) -> None:
+        """Default cancel returns None (no-op)."""
+        result = await _ConcreteClient().cancel()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_does_not_raise(self) -> None:
+        """Default cancel completes without raising."""
+        await _ConcreteClient().cancel()
+
+    @pytest.mark.asyncio
+    async def test_close_returns_none(self) -> None:
+        """Default close returns None (no-op)."""
+        result = await _ConcreteClient().close()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_close_does_not_raise(self) -> None:
+        """Default close completes without raising."""
+        await _ConcreteClient().close()
+
+    @pytest.mark.asyncio
+    async def test_health_check_can_be_overridden(self) -> None:
+        """A subclass can override health_check to return False."""
+        class _UnhealthyClient(BaseAgentClient):
+            async def send_request(self, request: AgentRequest) -> AgentResponse:
+                """Return a fixed response."""
+                return AgentResponse(content="x", model="m", input_tokens=1, output_tokens=1)
+
+            async def health_check(self) -> bool:
+                """Always report unhealthy."""
+                return False
+
+        assert await _UnhealthyClient().health_check() is False

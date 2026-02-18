@@ -34,3 +34,13 @@ class BaseAgentClient(ABC):
         """Convenience: build AgentRequest from prompt and kwargs, call send_request_stream."""
         async for chunk in self.send_request_stream(AgentRequest(prompt=prompt, **kwargs)):
             yield chunk
+
+    async def health_check(self) -> bool:
+        """Check if the backend is available and responsive. Returns True by default."""
+        return True
+
+    async def cancel(self) -> None:
+        """Request cancellation of in-progress work. Best-effort, no-op by default."""
+
+    async def close(self) -> None:
+        """Release resources (HTTP client, model, executor). No-op by default."""
