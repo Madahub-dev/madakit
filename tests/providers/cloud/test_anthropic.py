@@ -7,6 +7,8 @@ _build_payload (task 4.2.2) — Anthropic wire format: system as top-level
 field, messages array with user turn only, stop_sequences mapping.
 _parse_response (task 4.2.3) — content[0].text extraction, model fallback,
 input_tokens/output_tokens defaults.
+Attachment support (task 4.2.4) — Attachment mapped to Anthropic image source
+blocks (base64-encoded bytes, media_type), text block appended after images.
 """
 
 from __future__ import annotations
@@ -358,3 +360,111 @@ class TestParseResponse:
             _make_response(usage={"input_tokens": 20, "output_tokens": 30})
         )
         assert result.total_tokens == 50
+
+
+# ---------------------------------------------------------------------------
+# TestAttachmentSupport
+# ---------------------------------------------------------------------------
+
+
+import base64 as _base64
+
+from mada_modelkit._types import Attachment
+
+
+class TestAttachmentSupport:
+    """AnthropicClient._build_payload attachment mapping (task 4.2.4)."""
+
+    def test_no_attachments_content_is_plain_string(self) -> None:
+        """Without attachments, user message content is a plain string."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request())
+        assert payload["messages"][0]["content"] == "Hello"
+
+    def test_single_attachment_content_is_list(self) -> None:
+        """With an attachment, user message content becomes a list."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        att = Attachment(content=b"img", media_type="image/png")
+        payload = client._build_payload(_make_request(attachments=[att]))
+        assert isinstance(payload["messages"][0]["content"], list)
+
+    def test_attachment_block_type_is_image(self) -> None:
+        """The attachment content block has type 'image'."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        att = Attachment(content=b"img", media_type="image/jpeg")
+        payload = client._build_payload(_make_request(attachments=[att]))
+        content = payload["messages"][0]["content"]
+        assert content[0]["type"] == "image"
+
+    def test_attachment_source_type_is_base64(self) -> None:
+        """The image source block has type 'base64'."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        att = Attachment(content=b"img", media_type="image/png")
+        payload = client._build_payload(_make_request(attachments=[att]))
+        source = payload["messages"][0]["content"][0]["source"]
+        assert source["type"] == "base64"
+
+    def test_attachment_media_type_propagated(self) -> None:
+        """media_type from Attachment is placed in the source block."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        att = Attachment(content=b"img", media_type="image/webp")
+        payload = client._build_payload(_make_request(attachments=[att]))
+        source = payload["messages"][0]["content"][0]["source"]
+        assert source["media_type"] == "image/webp"
+
+    def test_attachment_bytes_base64_encoded(self) -> None:
+        """Attachment bytes are base64-encoded in the source data field."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        raw = b"\x89PNG\r\n"
+        att = Attachment(content=raw, media_type="image/png")
+        payload = client._build_payload(_make_request(attachments=[att]))
+        source = payload["messages"][0]["content"][0]["source"]
+        assert source["data"] == _base64.b64encode(raw).decode("ascii")
+
+    def test_text_block_appended_after_image_blocks(self) -> None:
+        """The text block (prompt) comes after all image blocks."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        att = Attachment(content=b"img", media_type="image/png")
+        payload = client._build_payload(_make_request(prompt="Describe", attachments=[att]))
+        content = payload["messages"][0]["content"]
+        assert content[-1]["type"] == "text"
+
+    def test_text_block_contains_prompt(self) -> None:
+        """The text block's text field equals request.prompt."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        att = Attachment(content=b"img", media_type="image/jpeg")
+        payload = client._build_payload(_make_request(prompt="What is this?", attachments=[att]))
+        content = payload["messages"][0]["content"]
+        assert content[-1]["text"] == "What is this?"
+
+    def test_multiple_attachments_all_present(self) -> None:
+        """Multiple attachments each produce a separate image block."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        atts = [
+            Attachment(content=b"a", media_type="image/png"),
+            Attachment(content=b"b", media_type="image/jpeg"),
+        ]
+        payload = client._build_payload(_make_request(attachments=atts))
+        content = payload["messages"][0]["content"]
+        image_blocks = [b for b in content if b.get("type") == "image"]
+        assert len(image_blocks) == 2
+
+    def test_multiple_attachments_order_preserved(self) -> None:
+        """Attachments appear in the same order as request.attachments."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        atts = [
+            Attachment(content=b"first", media_type="image/png"),
+            Attachment(content=b"second", media_type="image/gif"),
+        ]
+        payload = client._build_payload(_make_request(attachments=atts))
+        content = payload["messages"][0]["content"]
+        assert content[0]["source"]["data"] == _base64.b64encode(b"first").decode("ascii")
+        assert content[1]["source"]["data"] == _base64.b64encode(b"second").decode("ascii")
+
+    def test_content_list_length_is_attachments_plus_one(self) -> None:
+        """Content list has len(attachments) image blocks + 1 text block."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        atts = [Attachment(content=bytes([i]), media_type="image/png") for i in range(3)]
+        payload = client._build_payload(_make_request(attachments=atts))
+        content = payload["messages"][0]["content"]
+        assert len(content) == 4  # 3 images + 1 text

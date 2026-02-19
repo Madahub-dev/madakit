@@ -8,6 +8,7 @@ Does NOT use OpenAICompatMixin — Anthropic uses its own wire format.
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 from mada_modelkit._types import AgentRequest, AgentResponse
@@ -64,9 +65,33 @@ class AnthropicClient(HttpAgentClient):
         contains only the user turn.  Stop sequences are mapped to
         ``stop_sequences`` (Anthropic's name).  ``temperature`` and
         ``max_tokens`` are always included.
+
+        When ``request.attachments`` is non-empty, the user message ``content``
+        becomes a list of Anthropic source blocks: one ``image`` block per
+        attachment (base64-encoded bytes + media_type), followed by a ``text``
+        block for the prompt.  Without attachments, ``content`` is a plain
+        string.
         """
-        messages: list[dict[str, str]] = [
-            {"role": "user", "content": request.prompt},
+        if request.attachments:
+            content: str | list[dict[str, Any]] = [
+                *[
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": att.media_type,
+                            "data": base64.b64encode(att.content).decode("ascii"),
+                        },
+                    }
+                    for att in request.attachments
+                ],
+                {"type": "text", "text": request.prompt},
+            ]
+        else:
+            content = request.prompt
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": content},
         ]
         payload: dict[str, Any] = {
             "model": self._model,
