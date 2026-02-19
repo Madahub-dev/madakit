@@ -1,4 +1,4 @@
-"""Tests for OpenAICompatMixin._build_payload, _parse_response, and _endpoint (tasks 3.2.1–3.2.3).
+"""Tests for OpenAICompatMixin: _build_payload, _parse_response, _endpoint, and integration (tasks 3.2.1–3.2.4).
 
 Covers: messages list structure with and without system_prompt, user message
 always present, model field from _model attribute, max_tokens and temperature
@@ -7,16 +7,22 @@ stop is a list; _parse_response: content from choices[0].message.content,
 model from data["model"] with fallback to _model, input_tokens from
 usage.prompt_tokens (default 0), output_tokens from usage.completion_tokens
 (default 0), AgentResponse type returned; _endpoint: returns the string
-"/chat/completions", is a str, starts with "/".
+"/chat/completions", is a str, starts with "/"; module exports (__all__,
+importable); integration: mixin + HttpAgentClient full round-trip via
+MockTransport, system prompt + stop together, model override, POST to
+/chat/completions endpoint.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
+import httpx
 import pytest
 
 from mada_modelkit._types import AgentRequest, AgentResponse
+from mada_modelkit.providers._http_base import HttpAgentClient
 from mada_modelkit.providers._openai_compat import OpenAICompatMixin
 
 
@@ -295,3 +301,137 @@ class TestEndpoint:
         """Asserts that the endpoint path starts with '/'."""
         client = _ConcreteCompat()
         assert client._endpoint().startswith("/")
+
+
+class TestModuleExports:
+    """_openai_compat module — __all__ and public name availability."""
+
+    def test_all_is_defined(self) -> None:
+        """Asserts that __all__ is defined in _openai_compat."""
+        import mada_modelkit.providers._openai_compat as mod
+        assert hasattr(mod, "__all__")
+
+    def test_openai_compat_mixin_in_all(self) -> None:
+        """Asserts that 'OpenAICompatMixin' is listed in __all__."""
+        import mada_modelkit.providers._openai_compat as mod
+        assert "OpenAICompatMixin" in mod.__all__
+
+    def test_openai_compat_mixin_importable(self) -> None:
+        """Asserts that OpenAICompatMixin can be imported from the module."""
+        from mada_modelkit.providers._openai_compat import OpenAICompatMixin as OAC
+        assert OAC is OpenAICompatMixin
+
+
+# ---------------------------------------------------------------------------
+# Combined subclass for integration tests
+# ---------------------------------------------------------------------------
+
+
+class _OpenAICompatClient(OpenAICompatMixin, HttpAgentClient):
+    """Concrete provider combining OpenAICompatMixin with HttpAgentClient."""
+
+    _model: str = "gpt-4o-mini"
+
+
+def _compat_response(content: str = "ok", model: str = "gpt-4o-mini") -> bytes:
+    """Return a JSON-encoded OpenAI-compatible response body."""
+    body = {
+        "choices": [{"message": {"content": content}}],
+        "model": model,
+        "usage": {"prompt_tokens": 8, "completion_tokens": 4},
+    }
+    return json.dumps(body).encode()
+
+
+class TestIntegration:
+    """OpenAICompatMixin + HttpAgentClient — full end-to-end round-trip scenarios."""
+
+    def _make_combined(
+        self,
+        handler: Any,
+        model: str = "gpt-4o-mini",
+    ) -> _OpenAICompatClient:
+        """Return a combined client wired to a MockTransport handler."""
+        client = _OpenAICompatClient(base_url="https://api.example.com")
+        client._model = model
+        client._http_client = httpx.AsyncClient(
+            base_url="https://api.example.com",
+            transport=httpx.MockTransport(handler),
+        )
+        return client
+
+    async def test_full_round_trip_returns_agent_response(self) -> None:
+        """Asserts that a full send_request call through the mixin returns AgentResponse."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_compat_response("Hello, world!"))
+
+        client = self._make_combined(handler)
+        result = await client.send_request(AgentRequest(prompt="hi"))
+        assert isinstance(result, AgentResponse)
+        assert result.content == "Hello, world!"
+
+    async def test_send_request_posts_to_chat_completions(self) -> None:
+        """Asserts that the POST is sent to /chat/completions."""
+        captured_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_paths.append(request.url.path)
+            return httpx.Response(200, content=_compat_response())
+
+        client = self._make_combined(handler)
+        await client.send_request(AgentRequest(prompt="hi"))
+        assert captured_paths[0].endswith("/chat/completions")
+
+    async def test_payload_includes_model_from_class(self) -> None:
+        """Asserts that the POST body contains the _model attribute value."""
+        captured_bodies: list[dict[str, Any]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_bodies.append(json.loads(request.content))
+            return httpx.Response(200, content=_compat_response(model="gpt-4o"))
+
+        client = self._make_combined(handler, model="gpt-4o")
+        await client.send_request(AgentRequest(prompt="hi"))
+        assert captured_bodies[0]["model"] == "gpt-4o"
+
+    async def test_system_prompt_and_stop_together(self) -> None:
+        """Asserts that system_prompt and stop are both reflected in the payload."""
+        captured_bodies: list[dict[str, Any]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_bodies.append(json.loads(request.content))
+            return httpx.Response(200, content=_compat_response())
+
+        client = self._make_combined(handler)
+        await client.send_request(
+            AgentRequest(prompt="hi", system_prompt="Be brief.", stop=["END"])
+        )
+        body = captured_bodies[0]
+        roles = [m["role"] for m in body["messages"]]
+        assert "system" in roles
+        assert body["stop"] == ["END"]
+
+    async def test_token_counts_propagated_to_response(self) -> None:
+        """Asserts that token counts from the response body reach AgentResponse."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = {
+                "choices": [{"message": {"content": "answer"}}],
+                "model": "gpt-4o-mini",
+                "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+            }
+            return httpx.Response(200, content=json.dumps(body).encode())
+
+        client = self._make_combined(handler)
+        result = await client.send_request(AgentRequest(prompt="hi"))
+        assert result.input_tokens == 20
+        assert result.output_tokens == 10
+
+    async def test_context_manager_closes_client(self) -> None:
+        """Asserts that the async context manager closes the underlying httpx client."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_compat_response())
+
+        client = self._make_combined(handler)
+        async with client:
+            await client.send_request(AgentRequest(prompt="hi"))
+        assert client._http_client.is_closed
