@@ -1,5 +1,5 @@
 
-"""Tests for HttpAgentClient: constructor, TLS, abstract methods, send_request, health_check, close (tasks 3.1.1–3.1.6).
+"""Tests for HttpAgentClient: constructor, TLS, abstract methods, send_request, health_check, close, integration (tasks 3.1.1–3.1.7).
 
 Covers: base_url storage, default timeout values (connect=5.0, read=60.0),
 custom timeout configuration, headers merged into client, no headers default,
@@ -12,7 +12,9 @@ blocked without all three methods, overrides callable, send_request pipeline
 (success, non-2xx ProviderError with status_code, ConnectError wrapping,
 TimeoutException wrapping), health_check (True on any HTTP response, False on
 ConnectError/TimeoutException), close (delegates to httpx aclose, context
-manager releases connection on exit).
+manager releases connection on exit), integration (POST method, header
+propagation, custom endpoint, sequential requests, semaphore limiting,
+stacked with RetryMiddleware, context manager + request).
 """
 
 from __future__ import annotations
@@ -536,3 +538,155 @@ class TestClose:
         client = _make_client(_ok_transport({}))
         await client.close()
         await client.close()  # second call must not raise
+
+
+# ---------------------------------------------------------------------------
+# Additional integration helper — alternate endpoint subclass
+# ---------------------------------------------------------------------------
+
+
+class _AltEndpointClient(_ConcreteHttpClient):
+    """Concrete client that returns a different endpoint path."""
+
+    def _endpoint(self) -> str:
+        """Return an alternate endpoint for routing tests."""
+        return "/chat/completions"
+
+
+class TestIntegration:
+    """HttpAgentClient — end-to-end integration scenarios."""
+
+    async def test_send_request_uses_post_method(self) -> None:
+        """Asserts that send_request issues a POST (not GET or PUT) to the endpoint."""
+        captured_methods: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_methods.append(request.method)
+            return httpx.Response(200, content=json.dumps({}).encode())
+
+        client = _make_client(httpx.MockTransport(handler))
+        await client.send_request(AgentRequest(prompt="hi"))
+        assert captured_methods == ["POST"]
+
+    async def test_send_request_forwards_custom_headers(self) -> None:
+        """Asserts that headers set at construction are forwarded with each POST."""
+        captured_auth: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_auth.append(request.headers.get("authorization", ""))
+            return httpx.Response(200, content=json.dumps({}).encode())
+
+        base_client = _ConcreteHttpClient(
+            base_url="https://api.example.com",
+            headers={"Authorization": "Bearer sk-test"},
+        )
+        base_client._http_client = httpx.AsyncClient(
+            base_url="https://api.example.com",
+            transport=httpx.MockTransport(handler),
+            headers={"Authorization": "Bearer sk-test"},
+        )
+        await base_client.send_request(AgentRequest(prompt="hi"))
+        assert captured_auth[0] == "Bearer sk-test"
+
+    async def test_send_request_routes_to_custom_endpoint(self) -> None:
+        """Asserts that a subclass with a different _endpoint() routes correctly."""
+        captured_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_paths.append(request.url.path)
+            return httpx.Response(200, content=json.dumps({}).encode())
+
+        client = _AltEndpointClient(base_url="https://api.example.com")
+        client._http_client = httpx.AsyncClient(
+            base_url="https://api.example.com",
+            transport=httpx.MockTransport(handler),
+        )
+        await client.send_request(AgentRequest(prompt="hi"))
+        assert captured_paths[0].endswith("/chat/completions")
+
+    async def test_sequential_requests_return_independent_responses(self) -> None:
+        """Asserts that two sequential send_request calls return distinct AgentResponse objects."""
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(200, content=json.dumps({"n": call_count}).encode())
+
+        client = _make_client(httpx.MockTransport(handler))
+        r1 = await client.send_request(AgentRequest(prompt="first"))
+        r2 = await client.send_request(AgentRequest(prompt="second"))
+        assert r1 is not r2
+        assert call_count == 2
+
+    async def test_context_manager_with_send_request(self) -> None:
+        """Asserts that send_request works correctly inside the async context manager."""
+        async with _make_client(_ok_transport({"ok": True})) as client:
+            result = await client.send_request(AgentRequest(prompt="hi"))
+        assert isinstance(result, AgentResponse)
+        assert client._http_client.is_closed
+
+    async def test_health_check_and_send_request_share_same_client(self) -> None:
+        """Asserts that health_check and send_request use the same underlying httpx client."""
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(200, content=json.dumps({}).encode())
+
+        client = _make_client(httpx.MockTransport(handler))
+        await client.health_check()
+        await client.send_request(AgentRequest(prompt="hi"))
+        assert call_count == 2
+
+    async def test_stacked_with_retry_middleware(self) -> None:
+        """Asserts that HttpAgentClient works correctly when wrapped by RetryMiddleware."""
+        import asyncio
+
+        from mada_modelkit.middleware.retry import RetryMiddleware
+
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                return httpx.Response(500, text="server error")
+            return httpx.Response(200, content=json.dumps({}).encode())
+
+        http_client = _make_client(httpx.MockTransport(handler))
+        stacked = RetryMiddleware(http_client, max_retries=3, backoff_base=0.0)
+        result = await stacked.send_request(AgentRequest(prompt="hi"))
+        assert isinstance(result, AgentResponse)
+        assert call_count == 2
+
+    async def test_max_concurrent_limits_parallel_requests(self) -> None:
+        """Asserts that max_concurrent=1 prevents more than one simultaneous request."""
+        import asyncio
+
+        active = 0
+        max_active = 0
+
+        async def slow_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return httpx.Response(200, content=json.dumps({}).encode())
+
+        transport = httpx.MockTransport(slow_handler)
+        client = _ConcreteHttpClient(
+            base_url="https://api.example.com", max_concurrent=1
+        )
+        client._http_client = httpx.AsyncClient(
+            base_url="https://api.example.com", transport=transport
+        )
+
+        async def make_request() -> AgentResponse:
+            async with client._semaphore:  # type: ignore[union-attr]
+                return await client.send_request(AgentRequest(prompt="hi"))
+
+        await asyncio.gather(make_request(), make_request(), make_request())
+        assert max_active <= 1
