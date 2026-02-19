@@ -159,3 +159,79 @@ class TestRepr:
         """repr returns a str."""
         client = LlamaCppClient(model_path="model.gguf")
         assert isinstance(repr(client), str)
+
+
+# ---------------------------------------------------------------------------
+# TestAenter
+# ---------------------------------------------------------------------------
+
+
+class TestAenter:
+    """LlamaCppClient.__aenter__ model loading (task 6.1.2)."""
+
+    @pytest.mark.asyncio
+    async def test_aenter_returns_self(self) -> None:
+        """__aenter__ returns the client instance."""
+        client = LlamaCppClient(model_path="model.gguf")
+        with patch.object(client, "_load_model", return_value=MagicMock()):
+            result = await client.__aenter__()
+        assert result is client
+
+    @pytest.mark.asyncio
+    async def test_aenter_sets_llm(self) -> None:
+        """_llm is set to a non-None value after __aenter__."""
+        client = LlamaCppClient(model_path="model.gguf")
+        mock_llm = MagicMock()
+        with patch.object(client, "_load_model", return_value=mock_llm):
+            await client.__aenter__()
+        assert client._llm is mock_llm
+
+    @pytest.mark.asyncio
+    async def test_aenter_calls_load_model_once(self) -> None:
+        """__aenter__ calls _load_model exactly once."""
+        client = LlamaCppClient(model_path="model.gguf")
+        mock_load = MagicMock(return_value=MagicMock())
+        with patch.object(client, "_load_model", mock_load):
+            await client.__aenter__()
+        mock_load.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_aenter_llm_was_none_before(self) -> None:
+        """_llm is None before __aenter__ is called."""
+        client = LlamaCppClient(model_path="model.gguf")
+        assert client._llm is None
+
+    @pytest.mark.asyncio
+    async def test_aenter_via_context_manager(self) -> None:
+        """async with sets _llm via __aenter__."""
+        with patch.object(
+            LlamaCppClient, "_load_model", return_value=MagicMock()
+        ):
+            async with LlamaCppClient(model_path="model.gguf") as client:
+                assert client._llm is not None
+
+    @pytest.mark.asyncio
+    async def test_aenter_dispatches_via_executor(self) -> None:
+        """__aenter__ dispatches _load_model through run_in_executor."""
+        client = LlamaCppClient(model_path="model.gguf")
+        call_thread_ids: list[int] = []
+        import threading
+
+        def load_and_record() -> MagicMock:
+            """Record the thread id of the loader call."""
+            call_thread_ids.append(threading.current_thread().ident or 0)
+            return MagicMock()
+
+        with patch.object(client, "_load_model", side_effect=load_and_record):
+            await client.__aenter__()
+        # The load ran in a worker thread, not the main asyncio thread.
+        assert call_thread_ids[0] != threading.main_thread().ident
+
+    def test_deferred_import_not_at_module_level(self) -> None:
+        """llama_cpp is not imported when llamacpp.py is imported."""
+        import sys
+
+        # llamacpp module is importable without llama_cpp installed.
+        import mada_modelkit.providers.native.llamacpp  # noqa: F401
+
+        assert "llama_cpp" not in sys.modules
