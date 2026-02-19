@@ -235,3 +235,99 @@ class TestAenter:
         import mada_modelkit.providers.native.llamacpp  # noqa: F401
 
         assert "llama_cpp" not in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# TestSendRequest
+# ---------------------------------------------------------------------------
+
+
+def _loaded_client() -> LlamaCppClient:
+    """Return a LlamaCppClient with _llm pre-set to a MagicMock (already loaded)."""
+    client = LlamaCppClient(model_path="model.gguf")
+    client._llm = MagicMock()
+    return client
+
+
+def _fake_response() -> AgentResponse:
+    """Return a minimal AgentResponse for use as a mock return value."""
+    return AgentResponse(
+        content="hello", model="model.gguf", input_tokens=5, output_tokens=3
+    )
+
+
+class TestSendRequest:
+    """LlamaCppClient.send_request (task 6.1.3)."""
+
+    @pytest.mark.asyncio
+    async def test_send_request_returns_agent_response(self) -> None:
+        """send_request returns an AgentResponse."""
+        client = _loaded_client()
+        with patch.object(client, "_sync_generate", return_value=_fake_response()):
+            result = await client.send_request(AgentRequest(prompt="Hi"))
+        assert isinstance(result, AgentResponse)
+
+    @pytest.mark.asyncio
+    async def test_send_request_content_from_sync_generate(self) -> None:
+        """AgentResponse.content matches what _sync_generate returned."""
+        client = _loaded_client()
+        with patch.object(client, "_sync_generate", return_value=_fake_response()):
+            result = await client.send_request(AgentRequest(prompt="Hi"))
+        assert result.content == "hello"
+
+    @pytest.mark.asyncio
+    async def test_send_request_calls_sync_generate(self) -> None:
+        """send_request calls _sync_generate exactly once with the request."""
+        client = _loaded_client()
+        mock_gen = MagicMock(return_value=_fake_response())
+        with patch.object(client, "_sync_generate", mock_gen):
+            request = AgentRequest(prompt="Test")
+            await client.send_request(request)
+        mock_gen.assert_called_once_with(request)
+
+    @pytest.mark.asyncio
+    async def test_send_request_lazy_loads_when_llm_is_none(self) -> None:
+        """send_request calls __aenter__ to load the model when _llm is None."""
+        client = LlamaCppClient(model_path="model.gguf")
+        assert client._llm is None
+        with patch.object(client, "_load_model", return_value=MagicMock()):
+            with patch.object(client, "_sync_generate", return_value=_fake_response()):
+                await client.send_request(AgentRequest(prompt="Hi"))
+        assert client._llm is not None
+
+    @pytest.mark.asyncio
+    async def test_send_request_does_not_reload_when_llm_set(self) -> None:
+        """send_request does not call _load_model when _llm is already loaded."""
+        client = _loaded_client()
+        mock_load = MagicMock(return_value=MagicMock())
+        with patch.object(client, "_load_model", mock_load):
+            with patch.object(client, "_sync_generate", return_value=_fake_response()):
+                await client.send_request(AgentRequest(prompt="Hi"))
+        mock_load.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_request_wraps_exception_as_provider_error(self) -> None:
+        """Exceptions from _sync_generate are wrapped as ProviderError."""
+        client = _loaded_client()
+        with patch.object(
+            client, "_sync_generate", side_effect=RuntimeError("inference failed")
+        ):
+            with pytest.raises(ProviderError, match="inference failed"):
+                await client.send_request(AgentRequest(prompt="Hi"))
+
+    @pytest.mark.asyncio
+    async def test_send_request_dispatches_to_executor(self) -> None:
+        """_sync_generate is run in a worker thread via the executor."""
+        import threading
+
+        client = _loaded_client()
+        call_thread_ids: list[int] = []
+
+        def recording_gen(request: AgentRequest) -> AgentResponse:
+            """Record thread id and return a fake response."""
+            call_thread_ids.append(threading.current_thread().ident or 0)
+            return _fake_response()
+
+        with patch.object(client, "_sync_generate", side_effect=recording_gen):
+            await client.send_request(AgentRequest(prompt="Hi"))
+        assert call_thread_ids[0] != threading.main_thread().ident
