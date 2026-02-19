@@ -8,6 +8,7 @@ repr. Does NOT use OpenAICompatMixin — Gemini uses its own wire format.
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 from mada_modelkit._types import AgentRequest, AgentResponse
@@ -58,8 +59,46 @@ class GeminiClient(HttpAgentClient):
         return f"/models/{self._model}:generateContent"
 
     def _build_payload(self, request: AgentRequest) -> dict[str, Any]:
-        """Build the Gemini generateContent request payload. Implemented in task 4.3.2."""
-        raise NotImplementedError
+        """Build the Gemini generateContent request payload.
+
+        Formats the request using Gemini's wire format:
+
+        - ``contents`` holds a single user turn whose ``parts`` list contains
+          one ``inlineData`` block per attachment (base64-encoded bytes +
+          mimeType) followed by a ``text`` part for the prompt.
+        - ``systemInstruction`` is a top-level field with a ``parts`` list;
+          omitted when ``request.system_prompt`` is absent.
+        - ``generationConfig`` carries ``maxOutputTokens``, ``temperature``,
+          and ``stopSequences`` (omitted when ``request.stop`` is ``None``).
+        - The model is encoded in the endpoint URL, not the payload body.
+        """
+        parts: list[dict[str, Any]] = [
+            {
+                "inlineData": {
+                    "mimeType": att.media_type,
+                    "data": base64.b64encode(att.content).decode("ascii"),
+                }
+            }
+            for att in request.attachments
+        ]
+        parts.append({"text": request.prompt})
+
+        generation_config: dict[str, Any] = {
+            "maxOutputTokens": request.max_tokens,
+            "temperature": request.temperature,
+        }
+        if request.stop:
+            generation_config["stopSequences"] = request.stop
+
+        payload: dict[str, Any] = {
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": generation_config,
+        }
+        if request.system_prompt:
+            payload["systemInstruction"] = {
+                "parts": [{"text": request.system_prompt}]
+            }
+        return payload
 
     def _parse_response(self, data: dict[str, Any]) -> AgentResponse:
         """Parse the Gemini generateContent response. Implemented in task 4.3.3."""
