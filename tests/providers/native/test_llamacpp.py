@@ -528,3 +528,137 @@ class TestSendRequest:
         with patch.object(client, "_sync_generate", side_effect=recording_gen):
             await client.send_request(AgentRequest(prompt="Hi"))
         assert call_thread_ids[0] != threading.main_thread().ident
+
+
+# ---------------------------------------------------------------------------
+# TestIntegration
+# ---------------------------------------------------------------------------
+
+
+class TestIntegration:
+    """End-to-end integration tests for LlamaCppClient with mocked llama_cpp.Llama."""
+
+    @pytest.mark.asyncio
+    async def test_full_pipeline_via_context_manager(self) -> None:
+        """Context manager loads the model and send_request returns a correct response."""
+        mock_llm = MagicMock(return_value=_llm_output(text="Paris"))
+        with patch.object(LlamaCppClient, "_load_model", return_value=mock_llm):
+            async with LlamaCppClient(model_path="/models/geo.gguf") as client:
+                response = await client.send_request(
+                    AgentRequest(prompt="Capital of France?")
+                )
+        assert response.content == "Paris"
+        assert response.model == "/models/geo.gguf"
+
+    @pytest.mark.asyncio
+    async def test_lazy_load_on_first_send_request(self) -> None:
+        """send_request triggers lazy model loading when called without __aenter__."""
+        mock_llm = MagicMock(return_value=_llm_output(text="lazy"))
+        client = LlamaCppClient(model_path="model.gguf")
+        assert client._llm is None
+        with patch.object(client, "_load_model", return_value=mock_llm):
+            response = await client.send_request(AgentRequest(prompt="Hi"))
+        assert response.content == "lazy"
+        assert client._llm is not None
+
+    @pytest.mark.asyncio
+    async def test_model_loaded_only_once_across_requests(self) -> None:
+        """Multiple send_request calls reuse the same loaded model without re-loading."""
+        mock_llm = MagicMock(return_value=_llm_output())
+        mock_load = MagicMock(return_value=mock_llm)
+        client = LlamaCppClient(model_path="model.gguf")
+        with patch.object(client, "_load_model", mock_load):
+            await client.send_request(AgentRequest(prompt="First"))
+            await client.send_request(AgentRequest(prompt="Second"))
+            await client.send_request(AgentRequest(prompt="Third"))
+        mock_load.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_token_counts_propagated(self) -> None:
+        """input_tokens, output_tokens, and total_tokens are correctly propagated."""
+        mock_llm = MagicMock(
+            return_value=_llm_output(prompt_tokens=20, completion_tokens=10)
+        )
+        with patch.object(LlamaCppClient, "_load_model", return_value=mock_llm):
+            async with LlamaCppClient(model_path="model.gguf") as client:
+                response = await client.send_request(AgentRequest(prompt="Count me"))
+        assert response.input_tokens == 20
+        assert response.output_tokens == 10
+        assert response.total_tokens == 30
+
+    @pytest.mark.asyncio
+    async def test_cancel_calls_abort_on_loaded_model(self) -> None:
+        """cancel() calls abort() on the loaded model in the end-to-end flow."""
+        mock_llm = MagicMock(return_value=_llm_output())
+        with patch.object(LlamaCppClient, "_load_model", return_value=mock_llm):
+            async with LlamaCppClient(model_path="model.gguf") as client:
+                await client.cancel()
+        mock_llm.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_close_releases_model_reference(self) -> None:
+        """After close(), _llm is None (model reference released)."""
+        mock_llm = MagicMock(return_value=_llm_output())
+        client = LlamaCppClient(model_path="model.gguf")
+        with patch.object(client, "_load_model", return_value=mock_llm):
+            await client.__aenter__()
+            assert client._llm is not None
+            await client.close()
+        assert client._llm is None
+
+    @pytest.mark.asyncio
+    async def test_context_manager_closes_on_exception(self) -> None:
+        """__aexit__ calls close() and sets _llm to None even when an exception is raised."""
+        mock_llm = MagicMock(return_value=_llm_output())
+        client_ref: list[LlamaCppClient] = []
+        with patch.object(LlamaCppClient, "_load_model", return_value=mock_llm):
+            with pytest.raises(ValueError, match="inner error"):
+                async with LlamaCppClient(model_path="model.gguf") as client:
+                    client_ref.append(client)
+                    raise ValueError("inner error")
+        assert client_ref[0]._llm is None
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_yields_full_content(self) -> None:
+        """send_request_stream (inherited default) yields one final chunk with full content."""
+        mock_llm = MagicMock(return_value=_llm_output(text="streamed content"))
+        chunks: list = []
+        with patch.object(LlamaCppClient, "_load_model", return_value=mock_llm):
+            async with LlamaCppClient(model_path="model.gguf") as client:
+                async for chunk in client.send_request_stream(
+                    AgentRequest(prompt="Stream me")
+                ):
+                    chunks.append(chunk)
+        assert len(chunks) == 1
+        assert chunks[0].delta == "streamed content"
+        assert chunks[0].is_final is True
+
+    @pytest.mark.asyncio
+    async def test_provider_error_on_inference_failure(self) -> None:
+        """ProviderError is raised when llm inference raises an exception."""
+        mock_llm = MagicMock(side_effect=RuntimeError("GPU OOM"))
+        with patch.object(LlamaCppClient, "_load_model", return_value=mock_llm):
+            async with LlamaCppClient(model_path="model.gguf") as client:
+                with pytest.raises(ProviderError, match="GPU OOM"):
+                    await client.send_request(AgentRequest(prompt="Crash"))
+
+    @pytest.mark.asyncio
+    async def test_stacked_with_retry_middleware(self) -> None:
+        """LlamaCppClient works correctly when wrapped with RetryMiddleware."""
+        from mada_modelkit.middleware.retry import RetryMiddleware
+
+        mock_llm = MagicMock(return_value=_llm_output(text="retried response"))
+        with patch.object(LlamaCppClient, "_load_model", return_value=mock_llm):
+            async with LlamaCppClient(model_path="model.gguf") as llama_client:
+                retry_client = RetryMiddleware(llama_client, max_retries=1)
+                response = await retry_client.send_request(AgentRequest(prompt="Hi"))
+        assert response.content == "retried response"
+
+    @pytest.mark.asyncio
+    async def test_model_path_in_response(self) -> None:
+        """AgentResponse.model reflects the _model_path exactly."""
+        mock_llm = MagicMock(return_value=_llm_output())
+        with patch.object(LlamaCppClient, "_load_model", return_value=mock_llm):
+            async with LlamaCppClient(model_path="/very/specific/path.gguf") as client:
+                response = await client.send_request(AgentRequest(prompt="Hi"))
+        assert response.model == "/very/specific/path.gguf"
