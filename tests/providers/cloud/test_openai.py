@@ -1,4 +1,4 @@
-"""Tests for OpenAIClient constructor and __repr__ (tasks 4.1.1–4.1.2).
+"""Tests for OpenAIClient constructor, __repr__, and send_request_stream (tasks 4.1.1–4.1.3).
 
 Covers: OpenAICompatMixin and HttpAgentClient inheritance, default model
 "gpt-4o-mini", custom model stored as _model, api_key stored as _api_key,
@@ -7,16 +7,22 @@ Authorization Bearer header set from api_key, http:// URL rejected by TLS
 enforcement, kwargs forwarded (connect_timeout, read_timeout, max_concurrent),
 httpx.AsyncClient created, per-instance client independence; __repr__:
 format "OpenAIClient(model=..., api_key=***)", key not present, model
-present, is a str.
+present, is a str; send_request_stream: SSE delta chunks yielded, final
+StreamChunk on [DONE], stream=True in payload, non-2xx raises ProviderError,
+ConnectError/TimeoutException wrapped as ProviderError, empty delta chunks
+not suppressed, non-data lines skipped.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
 
+from mada_modelkit._errors import ProviderError
+from mada_modelkit._types import AgentRequest, StreamChunk
 from mada_modelkit.providers._http_base import HttpAgentClient
 from mada_modelkit.providers._openai_compat import OpenAICompatMixin
 from mada_modelkit.providers.cloud.openai import OpenAIClient
@@ -188,3 +194,162 @@ class TestModuleExports:
         """Asserts that OpenAIClient can be imported from the module."""
         from mada_modelkit.providers.cloud.openai import OpenAIClient as OAC
         assert OAC is OpenAIClient
+
+
+# ---------------------------------------------------------------------------
+# SSE helpers for send_request_stream tests
+# ---------------------------------------------------------------------------
+
+
+def _sse_body(*deltas: str, include_done: bool = True) -> bytes:
+    """Build a minimal SSE response body with content deltas and optional [DONE]."""
+    lines: list[str] = []
+    for delta in deltas:
+        chunk = {"choices": [{"delta": {"content": delta}}], "model": "gpt-4o-mini"}
+        lines.append(f"data: {json.dumps(chunk)}\n\n")
+    if include_done:
+        lines.append("data: [DONE]\n\n")
+    return "".join(lines).encode()
+
+
+def _make_streaming_client(handler: object) -> OpenAIClient:
+    """Return an OpenAIClient whose httpx client uses a MockTransport."""
+    client = OpenAIClient(api_key="sk-test")
+    client._http_client = httpx.AsyncClient(
+        base_url="https://api.openai.com/v1",
+        transport=httpx.MockTransport(handler),  # type: ignore[arg-type]
+    )
+    return client
+
+
+class TestSendRequestStream:
+    """OpenAIClient.send_request_stream — SSE parsing and error handling."""
+
+    async def test_yields_stream_chunks(self) -> None:
+        """Asserts that send_request_stream yields StreamChunk instances."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_sse_body("Hello"))
+
+        client = _make_streaming_client(handler)
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="hi"))]
+        assert all(isinstance(c, StreamChunk) for c in chunks)
+
+    async def test_delta_content_matches_sse_lines(self) -> None:
+        """Asserts that each non-final StreamChunk delta matches the SSE content."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_sse_body("Hello", " world"))
+
+        client = _make_streaming_client(handler)
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="hi"))]
+        content_chunks = [c for c in chunks if not c.is_final]
+        assert [c.delta for c in content_chunks] == ["Hello", " world"]
+
+    async def test_final_chunk_has_is_final_true(self) -> None:
+        """Asserts that the last StreamChunk yielded has is_final=True."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_sse_body("Hi"))
+
+        client = _make_streaming_client(handler)
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="hi"))]
+        assert chunks[-1].is_final is True
+
+    async def test_final_chunk_on_done_has_empty_delta(self) -> None:
+        """Asserts that the [DONE] sentinel produces a StreamChunk with delta=''."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_sse_body("Hi"))
+
+        client = _make_streaming_client(handler)
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="hi"))]
+        final = next(c for c in chunks if c.is_final)
+        assert final.delta == ""
+
+    async def test_non_final_chunks_have_is_final_false(self) -> None:
+        """Asserts that content StreamChunks have is_final=False."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_sse_body("A", "B"))
+
+        client = _make_streaming_client(handler)
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="hi"))]
+        content_chunks = [c for c in chunks if not c.is_final]
+        assert all(not c.is_final for c in content_chunks)
+
+    async def test_stream_true_added_to_payload(self) -> None:
+        """Asserts that the POST body includes stream=True."""
+        captured: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(json.loads(request.content))
+            return httpx.Response(200, content=_sse_body("ok"))
+
+        client = _make_streaming_client(handler)
+        async for _ in client.send_request_stream(AgentRequest(prompt="hi")):
+            pass
+        assert captured[0].get("stream") is True
+
+    async def test_non_data_lines_are_skipped(self) -> None:
+        """Asserts that comment and empty SSE lines produce no extra chunks."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = (
+                b": keep-alive\n\n"
+                b"data: " + json.dumps(
+                    {"choices": [{"delta": {"content": "hi"}}], "model": "gpt-4o-mini"}
+                ).encode() + b"\n\n"
+                b"data: [DONE]\n\n"
+            )
+            return httpx.Response(200, content=body)
+
+        client = _make_streaming_client(handler)
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="hi"))]
+        # Only content chunk + final DONE chunk
+        assert len(chunks) == 2
+
+    async def test_non_2xx_raises_provider_error(self) -> None:
+        """Asserts that a non-2xx streaming response raises ProviderError."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, text="Unauthorized")
+
+        client = _make_streaming_client(handler)
+        with pytest.raises(ProviderError):
+            async for _ in client.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+
+    async def test_non_2xx_provider_error_has_status_code(self) -> None:
+        """Asserts that the ProviderError from a non-2xx response carries the status code."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, text="Rate limited")
+
+        client = _make_streaming_client(handler)
+        with pytest.raises(ProviderError) as exc_info:
+            async for _ in client.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+        assert exc_info.value.status_code == 429
+
+    async def test_connect_error_raises_provider_error(self) -> None:
+        """Asserts that ConnectError during streaming is wrapped as ProviderError."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("refused")
+
+        client = _make_streaming_client(handler)
+        with pytest.raises(ProviderError):
+            async for _ in client.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+
+    async def test_timeout_raises_provider_error(self) -> None:
+        """Asserts that TimeoutException during streaming is wrapped as ProviderError."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("timed out", request=request)
+
+        client = _make_streaming_client(handler)
+        with pytest.raises(ProviderError):
+            async for _ in client.send_request_stream(AgentRequest(prompt="hi")):
+                pass
+
+    async def test_multiple_deltas_all_yielded(self) -> None:
+        """Asserts that all content chunks are yielded before the final chunk."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_sse_body("A", "B", "C"))
+
+        client = _make_streaming_client(handler)
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="hi"))]
+        content = [c.delta for c in chunks if not c.is_final]
+        assert content == ["A", "B", "C"]
