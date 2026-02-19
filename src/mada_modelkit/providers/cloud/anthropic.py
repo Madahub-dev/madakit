@@ -81,5 +81,17 @@ class AnthropicClient(HttpAgentClient):
         return payload
 
     def _parse_response(self, data: dict[str, Any]) -> AgentResponse:
-        """Parse the Anthropic API response. Implemented in task 4.2.3."""
-        raise NotImplementedError
+        """Parse an Anthropic Messages API response into an AgentResponse.
+
+        Extracts ``content[0].text`` for the response text, reads
+        ``usage.input_tokens`` and ``usage.output_tokens`` (defaulting to 0
+        when absent), and uses the response ``model`` field with a fallback to
+        ``self._model``.
+        """
+        usage = data.get("usage", {})
+        return AgentResponse(
+            content=data["content"][0]["text"],
+            model=data.get("model", self._model),
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+        )

@@ -5,6 +5,8 @@ model, api_key storage, base_url, x-api-key header, anthropic-version header,
 TLS enforcement, timeout forwarding, semaphore creation, and module exports.
 _build_payload (task 4.2.2) — Anthropic wire format: system as top-level
 field, messages array with user turn only, stop_sequences mapping.
+_parse_response (task 4.2.3) — content[0].text extraction, model fallback,
+input_tokens/output_tokens defaults.
 """
 
 from __future__ import annotations
@@ -259,3 +261,100 @@ class TestBuildPayload:
         payload = client._build_payload(_make_request())
         for key in ("model", "max_tokens", "messages", "temperature"):
             assert key in payload
+
+
+# ---------------------------------------------------------------------------
+# TestParseResponse
+# ---------------------------------------------------------------------------
+
+
+def _make_response(**kwargs: object) -> dict:  # type: ignore[type-arg]
+    """Return an Anthropic-shaped response dict with sensible defaults."""
+    data: dict = {
+        "id": "msg_test",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Hello"}],
+        "model": "claude-sonnet-4-6",
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+    data.update(kwargs)
+    return data
+
+
+class TestParseResponse:
+    """AnthropicClient._parse_response (task 4.2.3)."""
+
+    def test_returns_agent_response(self) -> None:
+        """_parse_response returns an AgentResponse instance."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        result = client._parse_response(_make_response())
+        assert isinstance(result, AgentResponse)
+
+    def test_content_extracted_from_content_array(self) -> None:
+        """content is extracted from data['content'][0]['text']."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        result = client._parse_response(_make_response(content=[{"type": "text", "text": "Hi!"}]))
+        assert result.content == "Hi!"
+
+    def test_model_from_response(self) -> None:
+        """model field is taken from the response data."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        result = client._parse_response(_make_response(model="claude-opus-4-6"))
+        assert result.model == "claude-opus-4-6"
+
+    def test_model_fallback_to_self_model(self) -> None:
+        """model falls back to self._model when absent from response."""
+        client = AnthropicClient(api_key="sk-ant-test", model="claude-haiku-4-5-20251001")
+        data = _make_response()
+        del data["model"]
+        result = client._parse_response(data)
+        assert result.model == "claude-haiku-4-5-20251001"
+
+    def test_input_tokens_from_usage(self) -> None:
+        """input_tokens is read from usage.input_tokens."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        result = client._parse_response(
+            _make_response(usage={"input_tokens": 42, "output_tokens": 7})
+        )
+        assert result.input_tokens == 42
+
+    def test_output_tokens_from_usage(self) -> None:
+        """output_tokens is read from usage.output_tokens."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        result = client._parse_response(
+            _make_response(usage={"input_tokens": 3, "output_tokens": 99})
+        )
+        assert result.output_tokens == 99
+
+    def test_input_tokens_default_zero_when_usage_absent(self) -> None:
+        """input_tokens defaults to 0 when usage key is absent."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        data = _make_response()
+        del data["usage"]
+        result = client._parse_response(data)
+        assert result.input_tokens == 0
+
+    def test_output_tokens_default_zero_when_usage_absent(self) -> None:
+        """output_tokens defaults to 0 when usage key is absent."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        data = _make_response()
+        del data["usage"]
+        result = client._parse_response(data)
+        assert result.output_tokens == 0
+
+    def test_tokens_default_zero_when_usage_fields_missing(self) -> None:
+        """Token counts default to 0 when usage is present but fields are absent."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        result = client._parse_response(_make_response(usage={}))
+        assert result.input_tokens == 0
+        assert result.output_tokens == 0
+
+    def test_total_tokens_property(self) -> None:
+        """total_tokens equals input_tokens + output_tokens."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        result = client._parse_response(
+            _make_response(usage={"input_tokens": 20, "output_tokens": 30})
+        )
+        assert result.total_tokens == 50
