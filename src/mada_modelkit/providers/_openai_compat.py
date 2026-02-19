@@ -47,8 +47,21 @@ class OpenAICompatMixin:
         return payload
 
     def _parse_response(self, data: dict[str, Any]) -> AgentResponse:
-        """Parse an OpenAI-compatible chat-completions response (stub; task 3.2.2)."""
-        raise NotImplementedError
+        """Parse an OpenAI-compatible chat-completions JSON response.
+
+        Extracts ``choices[0].message.content`` as the response text,
+        ``usage.prompt_tokens`` and ``usage.completion_tokens`` as token
+        counts (defaulting to 0 when absent), and ``data["model"]`` as the
+        model name (falling back to ``self._model`` when absent).
+        """
+        choice = data["choices"][0]
+        usage = data.get("usage", {})
+        return AgentResponse(
+            content=choice["message"]["content"],
+            model=data.get("model", self._model),
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+        )
 
     def _endpoint(self) -> str:
         """Return the chat-completions endpoint path (stub; task 3.2.3)."""

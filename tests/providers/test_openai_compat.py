@@ -1,9 +1,12 @@
-"""Tests for OpenAICompatMixin._build_payload (task 3.2.1).
+"""Tests for OpenAICompatMixin._build_payload and _parse_response (tasks 3.2.1–3.2.2).
 
 Covers: messages list structure with and without system_prompt, user message
 always present, model field from _model attribute, max_tokens and temperature
 fields, stop key absent when stop=None, stop key present and correct when
-stop is a list.
+stop is a list; _parse_response: content from choices[0].message.content,
+model from data["model"] with fallback to _model, input_tokens from
+usage.prompt_tokens (default 0), output_tokens from usage.completion_tokens
+(default 0), AgentResponse type returned.
 """
 
 from __future__ import annotations
@@ -25,14 +28,6 @@ class _ConcreteCompat(OpenAICompatMixin):
     """Minimal OpenAICompatMixin subclass with _model set for tests."""
 
     _model: str = "gpt-4o-mini"
-
-    def _parse_response(self, data: dict[str, Any]) -> AgentResponse:
-        """Stub parse for test isolation."""
-        raise NotImplementedError
-
-    def _endpoint(self) -> str:
-        """Stub endpoint for test isolation."""
-        raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
@@ -178,3 +173,105 @@ class TestBuildPayload:
         client = _ConcreteCompat()
         payload = client._build_payload(AgentRequest(prompt="hi"))
         assert isinstance(payload, dict)
+
+
+# ---------------------------------------------------------------------------
+# Helpers — minimal OpenAI-format response dicts
+# ---------------------------------------------------------------------------
+
+
+def _make_response(
+    content: str = "Hello!",
+    model: str = "gpt-4o-mini",
+    prompt_tokens: int = 10,
+    completion_tokens: int = 5,
+) -> dict:
+    """Return a minimal OpenAI-compatible chat-completions response dict."""
+    return {
+        "choices": [{"message": {"content": content}}],
+        "model": model,
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        },
+    }
+
+
+class TestParseResponse:
+    """OpenAICompatMixin._parse_response — extraction from OpenAI JSON format."""
+
+    def test_returns_agent_response(self) -> None:
+        """Asserts that _parse_response returns an AgentResponse instance."""
+        client = _ConcreteCompat()
+        result = client._parse_response(_make_response())
+        assert isinstance(result, AgentResponse)
+
+    def test_content_extracted_from_choices(self) -> None:
+        """Asserts that content comes from choices[0].message.content."""
+        client = _ConcreteCompat()
+        result = client._parse_response(_make_response(content="The answer is 42."))
+        assert result.content == "The answer is 42."
+
+    def test_model_extracted_from_data(self) -> None:
+        """Asserts that model is taken from the top-level 'model' key."""
+        client = _ConcreteCompat()
+        result = client._parse_response(_make_response(model="gpt-4o"))
+        assert result.model == "gpt-4o"
+
+    def test_model_falls_back_to_class_attribute_when_absent(self) -> None:
+        """Asserts that model falls back to self._model when 'model' key is missing."""
+        client = _ConcreteCompat()
+        data = _make_response()
+        del data["model"]
+        result = client._parse_response(data)
+        assert result.model == "gpt-4o-mini"
+
+    def test_input_tokens_from_prompt_tokens(self) -> None:
+        """Asserts that input_tokens is read from usage.prompt_tokens."""
+        client = _ConcreteCompat()
+        result = client._parse_response(_make_response(prompt_tokens=42))
+        assert result.input_tokens == 42
+
+    def test_output_tokens_from_completion_tokens(self) -> None:
+        """Asserts that output_tokens is read from usage.completion_tokens."""
+        client = _ConcreteCompat()
+        result = client._parse_response(_make_response(completion_tokens=17))
+        assert result.output_tokens == 17
+
+    def test_input_tokens_defaults_to_zero_when_usage_absent(self) -> None:
+        """Asserts that input_tokens is 0 when the usage key is missing entirely."""
+        client = _ConcreteCompat()
+        data = _make_response()
+        del data["usage"]
+        result = client._parse_response(data)
+        assert result.input_tokens == 0
+
+    def test_output_tokens_defaults_to_zero_when_usage_absent(self) -> None:
+        """Asserts that output_tokens is 0 when the usage key is missing entirely."""
+        client = _ConcreteCompat()
+        data = _make_response()
+        del data["usage"]
+        result = client._parse_response(data)
+        assert result.output_tokens == 0
+
+    def test_input_tokens_defaults_to_zero_when_prompt_tokens_absent(self) -> None:
+        """Asserts that input_tokens is 0 when prompt_tokens is absent from usage."""
+        client = _ConcreteCompat()
+        data = _make_response()
+        del data["usage"]["prompt_tokens"]
+        result = client._parse_response(data)
+        assert result.input_tokens == 0
+
+    def test_output_tokens_defaults_to_zero_when_completion_tokens_absent(self) -> None:
+        """Asserts that output_tokens is 0 when completion_tokens is absent from usage."""
+        client = _ConcreteCompat()
+        data = _make_response()
+        del data["usage"]["completion_tokens"]
+        result = client._parse_response(data)
+        assert result.output_tokens == 0
+
+    def test_total_tokens_is_sum_of_input_and_output(self) -> None:
+        """Asserts that total_tokens equals input_tokens + output_tokens."""
+        client = _ConcreteCompat()
+        result = client._parse_response(_make_response(prompt_tokens=10, completion_tokens=5))
+        assert result.total_tokens == 15
