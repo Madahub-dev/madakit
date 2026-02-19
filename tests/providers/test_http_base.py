@@ -1,5 +1,5 @@
 
-"""Tests for HttpAgentClient: constructor, TLS, abstract methods, send_request, health_check (tasks 3.1.1–3.1.5).
+"""Tests for HttpAgentClient: constructor, TLS, abstract methods, send_request, health_check, close (tasks 3.1.1–3.1.6).
 
 Covers: base_url storage, default timeout values (connect=5.0, read=60.0),
 custom timeout configuration, headers merged into client, no headers default,
@@ -11,7 +11,8 @@ _build_payload/_parse_response/_endpoint declared abstract, instantiation
 blocked without all three methods, overrides callable, send_request pipeline
 (success, non-2xx ProviderError with status_code, ConnectError wrapping,
 TimeoutException wrapping), health_check (True on any HTTP response, False on
-ConnectError/TimeoutException).
+ConnectError/TimeoutException), close (delegates to httpx aclose, context
+manager releases connection on exit).
 """
 
 from __future__ import annotations
@@ -498,3 +499,40 @@ class TestHealthCheck:
         client = _make_client(httpx.MockTransport(handler))
         await client.health_check()
         assert captured_methods == ["GET"]
+
+
+class TestClose:
+    """HttpAgentClient.close — delegates aclose to the underlying httpx client."""
+
+    async def test_close_does_not_raise(self) -> None:
+        """Asserts that calling close() completes without raising."""
+        client = _make_client(_ok_transport({}))
+        await client.close()  # must not raise
+
+    async def test_close_marks_http_client_as_closed(self) -> None:
+        """Asserts that the underlying httpx.AsyncClient is closed after close()."""
+        client = _make_client(_ok_transport({}))
+        await client.close()
+        assert client._http_client.is_closed
+
+    async def test_context_manager_calls_close(self) -> None:
+        """Asserts that exiting the async context manager closes the httpx client."""
+        async with _make_client(_ok_transport({})) as client:
+            pass
+        assert client._http_client.is_closed
+
+    async def test_context_manager_closes_on_exception(self) -> None:
+        """Asserts that the httpx client is closed even when the body raises."""
+        client = _make_client(_ok_transport({}))
+        try:
+            async with client:
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        assert client._http_client.is_closed
+
+    async def test_close_is_idempotent(self) -> None:
+        """Asserts that calling close() twice does not raise."""
+        client = _make_client(_ok_transport({}))
+        await client.close()
+        await client.close()  # second call must not raise

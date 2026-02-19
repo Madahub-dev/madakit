@@ -108,4 +108,5 @@ class HttpAgentClient(BaseAgentClient):
             return False
 
     async def close(self) -> None:
-        """Close the underlying httpx client (stub; implemented in task 3.1.6)."""
+        """Close the underlying httpx.AsyncClient, releasing all connections."""
+        await self._http_client.aclose()
