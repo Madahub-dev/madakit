@@ -57,8 +57,28 @@ class AnthropicClient(HttpAgentClient):
         return "/messages"
 
     def _build_payload(self, request: AgentRequest) -> dict[str, Any]:
-        """Build the Anthropic request payload. Implemented in task 4.2.2."""
-        raise NotImplementedError
+        """Build the Anthropic Messages API request payload.
+
+        Formats the request using Anthropic's wire format: the system prompt is
+        a top-level ``system`` field (omitted when absent), and ``messages``
+        contains only the user turn.  Stop sequences are mapped to
+        ``stop_sequences`` (Anthropic's name).  ``temperature`` and
+        ``max_tokens`` are always included.
+        """
+        messages: list[dict[str, str]] = [
+            {"role": "user", "content": request.prompt},
+        ]
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": request.max_tokens,
+            "messages": messages,
+            "temperature": request.temperature,
+        }
+        if request.system_prompt:
+            payload["system"] = request.system_prompt
+        if request.stop:
+            payload["stop_sequences"] = request.stop
+        return payload
 
     def _parse_response(self, data: dict[str, Any]) -> AgentResponse:
         """Parse the Anthropic API response. Implemented in task 4.2.3."""

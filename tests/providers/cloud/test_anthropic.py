@@ -3,6 +3,8 @@
 Covers: AnthropicClient constructor (task 4.2.1) — default model, custom
 model, api_key storage, base_url, x-api-key header, anthropic-version header,
 TLS enforcement, timeout forwarding, semaphore creation, and module exports.
+_build_payload (task 4.2.2) — Anthropic wire format: system as top-level
+field, messages array with user turn only, stop_sequences mapping.
 """
 
 from __future__ import annotations
@@ -155,3 +157,105 @@ class TestAnthropicClientConstructor:
         """_endpoint returns /messages."""
         client = AnthropicClient(api_key="sk-ant-test")
         assert client._endpoint() == "/messages"
+
+
+# ---------------------------------------------------------------------------
+# TestBuildPayload
+# ---------------------------------------------------------------------------
+
+
+def _make_request(**kwargs: object) -> AgentRequest:
+    """Return an AgentRequest with sensible defaults, overridden by kwargs."""
+    defaults: dict[str, object] = {
+        "prompt": "Hello",
+        "system_prompt": None,
+        "max_tokens": 1024,
+        "temperature": 0.7,
+        "stop": None,
+    }
+    defaults.update(kwargs)
+    return AgentRequest(**defaults)  # type: ignore[arg-type]
+
+
+class TestBuildPayload:
+    """AnthropicClient._build_payload (task 4.2.2)."""
+
+    def test_user_prompt_in_messages(self) -> None:
+        """User prompt appears as a user-role entry in the messages array."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request(prompt="Hi there"))
+        assert payload["messages"] == [{"role": "user", "content": "Hi there"}]
+
+    def test_messages_has_exactly_one_entry_without_system(self) -> None:
+        """Without a system prompt, messages contains exactly one user entry."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request())
+        assert len(payload["messages"]) == 1
+
+    def test_system_prompt_is_top_level_field(self) -> None:
+        """System prompt appears as a top-level 'system' key, not in messages."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request(system_prompt="Be helpful"))
+        assert payload["system"] == "Be helpful"
+
+    def test_system_prompt_not_in_messages(self) -> None:
+        """System prompt does not appear inside the messages array."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request(system_prompt="Be helpful"))
+        for msg in payload["messages"]:
+            assert msg.get("role") != "system"
+
+    def test_no_system_key_when_system_prompt_is_none(self) -> None:
+        """'system' key is absent from payload when system_prompt is None."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request(system_prompt=None))
+        assert "system" not in payload
+
+    def test_no_system_key_when_system_prompt_is_empty(self) -> None:
+        """'system' key is absent from payload when system_prompt is empty string."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request(system_prompt=""))
+        assert "system" not in payload
+
+    def test_model_in_payload(self) -> None:
+        """Payload contains the client's model identifier."""
+        client = AnthropicClient(api_key="sk-ant-test", model="claude-opus-4-6")
+        payload = client._build_payload(_make_request())
+        assert payload["model"] == "claude-opus-4-6"
+
+    def test_max_tokens_in_payload(self) -> None:
+        """max_tokens from the request appears in the payload."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request(max_tokens=512))
+        assert payload["max_tokens"] == 512
+
+    def test_temperature_in_payload(self) -> None:
+        """temperature from the request appears in the payload."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request(temperature=0.2))
+        assert payload["temperature"] == 0.2
+
+    def test_stop_sequences_mapped_from_stop(self) -> None:
+        """request.stop is mapped to 'stop_sequences' (Anthropic's name)."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request(stop=["END", "STOP"]))
+        assert payload["stop_sequences"] == ["END", "STOP"]
+
+    def test_stop_sequences_absent_when_stop_is_none(self) -> None:
+        """'stop_sequences' is absent from payload when request.stop is None."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request(stop=None))
+        assert "stop_sequences" not in payload
+
+    def test_stop_key_not_used(self) -> None:
+        """Payload uses 'stop_sequences' not 'stop' (OpenAI naming)."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request(stop=["X"]))
+        assert "stop" not in payload
+
+    def test_payload_keys_present(self) -> None:
+        """Payload always contains model, max_tokens, messages, temperature."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        payload = client._build_payload(_make_request())
+        for key in ("model", "max_tokens", "messages", "temperature"):
+            assert key in payload
