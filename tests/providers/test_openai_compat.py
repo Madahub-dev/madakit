@@ -11,17 +11,20 @@ usage.prompt_tokens (default 0), output_tokens from usage.completion_tokens
 importable); integration: mixin + HttpAgentClient full round-trip via
 MockTransport, system prompt + stop together, model override, POST to
 /chat/completions endpoint.
+Attachment support (gap-fill): Attachment mapped to OpenAI image_url content
+blocks (data URI with base64 bytes), text block appended after images.
 """
 
 from __future__ import annotations
 
+import base64 as _base64
 import json
 from typing import Any
 
 import httpx
 import pytest
 
-from mada_modelkit._types import AgentRequest, AgentResponse
+from mada_modelkit._types import AgentRequest, AgentResponse, Attachment
 from mada_modelkit.providers._http_base import HttpAgentClient
 from mada_modelkit.providers._openai_compat import OpenAICompatMixin
 
@@ -180,6 +183,105 @@ class TestBuildPayload:
         client = _ConcreteCompat()
         payload = client._build_payload(AgentRequest(prompt="hi"))
         assert isinstance(payload, dict)
+
+
+class TestBuildPayloadAttachments:
+    """OpenAICompatMixin._build_payload — attachment mapping to image_url blocks."""
+
+    def test_no_attachments_user_content_is_string(self) -> None:
+        """Without attachments, user message content is a plain string."""
+        client = _ConcreteCompat()
+        payload = client._build_payload(AgentRequest(prompt="hi"))
+        user_msg = next(m for m in payload["messages"] if m["role"] == "user")
+        assert user_msg["content"] == "hi"
+
+    def test_single_attachment_content_is_list(self) -> None:
+        """With an attachment, user message content becomes a list."""
+        client = _ConcreteCompat()
+        att = Attachment(content=b"img", media_type="image/png")
+        payload = client._build_payload(AgentRequest(prompt="hi", attachments=[att]))
+        user_msg = next(m for m in payload["messages"] if m["role"] == "user")
+        assert isinstance(user_msg["content"], list)
+
+    def test_attachment_block_type_is_image_url(self) -> None:
+        """The attachment content block has type 'image_url'."""
+        client = _ConcreteCompat()
+        att = Attachment(content=b"img", media_type="image/jpeg")
+        payload = client._build_payload(AgentRequest(prompt="hi", attachments=[att]))
+        user_msg = next(m for m in payload["messages"] if m["role"] == "user")
+        assert user_msg["content"][0]["type"] == "image_url"
+
+    def test_attachment_url_is_data_uri(self) -> None:
+        """image_url block URL is a base64 data URI with correct media_type prefix."""
+        client = _ConcreteCompat()
+        att = Attachment(content=b"img", media_type="image/png")
+        payload = client._build_payload(AgentRequest(prompt="hi", attachments=[att]))
+        user_msg = next(m for m in payload["messages"] if m["role"] == "user")
+        url = user_msg["content"][0]["image_url"]["url"]
+        assert url.startswith("data:image/png;base64,")
+
+    def test_attachment_data_is_base64_encoded(self) -> None:
+        """Attachment bytes are base64-encoded inside the data URI."""
+        client = _ConcreteCompat()
+        raw = b"\x89PNG\r\n"
+        att = Attachment(content=raw, media_type="image/png")
+        payload = client._build_payload(AgentRequest(prompt="hi", attachments=[att]))
+        user_msg = next(m for m in payload["messages"] if m["role"] == "user")
+        url = user_msg["content"][0]["image_url"]["url"]
+        encoded = _base64.b64encode(raw).decode("ascii")
+        assert url.endswith(encoded)
+
+    def test_text_block_appended_after_image_blocks(self) -> None:
+        """The text block (prompt) is the last element in the content list."""
+        client = _ConcreteCompat()
+        att = Attachment(content=b"img", media_type="image/jpeg")
+        payload = client._build_payload(AgentRequest(prompt="Describe", attachments=[att]))
+        user_msg = next(m for m in payload["messages"] if m["role"] == "user")
+        assert user_msg["content"][-1]["type"] == "text"
+        assert user_msg["content"][-1]["text"] == "Describe"
+
+    def test_multiple_attachments_all_present(self) -> None:
+        """Multiple attachments each produce a separate image_url block."""
+        client = _ConcreteCompat()
+        atts = [
+            Attachment(content=b"a", media_type="image/png"),
+            Attachment(content=b"b", media_type="image/jpeg"),
+        ]
+        payload = client._build_payload(AgentRequest(prompt="hi", attachments=atts))
+        user_msg = next(m for m in payload["messages"] if m["role"] == "user")
+        image_blocks = [b for b in user_msg["content"] if b.get("type") == "image_url"]
+        assert len(image_blocks) == 2
+
+    def test_multiple_attachments_order_preserved(self) -> None:
+        """Attachments appear in the same order as request.attachments."""
+        client = _ConcreteCompat()
+        atts = [
+            Attachment(content=b"first", media_type="image/png"),
+            Attachment(content=b"second", media_type="image/gif"),
+        ]
+        payload = client._build_payload(AgentRequest(prompt="hi", attachments=atts))
+        user_msg = next(m for m in payload["messages"] if m["role"] == "user")
+        assert _base64.b64encode(b"first").decode("ascii") in user_msg["content"][0]["image_url"]["url"]
+        assert _base64.b64encode(b"second").decode("ascii") in user_msg["content"][1]["image_url"]["url"]
+
+    def test_content_list_length_is_attachments_plus_one(self) -> None:
+        """Content list has len(attachments) image_url blocks + 1 text block."""
+        client = _ConcreteCompat()
+        atts = [Attachment(content=bytes([i]), media_type="image/png") for i in range(3)]
+        payload = client._build_payload(AgentRequest(prompt="hi", attachments=atts))
+        user_msg = next(m for m in payload["messages"] if m["role"] == "user")
+        assert len(user_msg["content"]) == 4  # 3 images + 1 text
+
+    def test_system_prompt_still_added_with_attachments(self) -> None:
+        """System prompt message is still prepended when attachments are present."""
+        client = _ConcreteCompat()
+        att = Attachment(content=b"img", media_type="image/png")
+        payload = client._build_payload(
+            AgentRequest(prompt="hi", system_prompt="Be helpful", attachments=[att])
+        )
+        roles = [m["role"] for m in payload["messages"]]
+        assert roles[0] == "system"
+        assert roles[1] == "user"
 
 
 # ---------------------------------------------------------------------------

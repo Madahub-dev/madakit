@@ -8,6 +8,7 @@ Requires no additional dependencies beyond ``httpx``.
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 from mada_modelkit._types import AgentRequest, AgentResponse
@@ -31,11 +32,37 @@ class OpenAICompatMixin:
         Constructs a ``messages`` list with an optional system message followed
         by the user message.  Includes ``model``, ``max_tokens``,
         ``temperature``, and ``stop`` (only when provided).
+
+        When ``request.attachments`` is non-empty, the user message
+        ``content`` becomes a list of OpenAI content blocks: one
+        ``image_url`` block per attachment (base64 data URI) followed by a
+        ``text`` block for the prompt.  Without attachments ``content`` is a
+        plain string.
         """
-        messages: list[dict[str, str]] = []
+        messages: list[dict[str, Any]] = []
         if request.system_prompt:
             messages.append({"role": "system", "content": request.system_prompt})
-        messages.append({"role": "user", "content": request.prompt})
+
+        if request.attachments:
+            user_content: str | list[dict[str, Any]] = [
+                *[
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": (
+                                f"data:{att.media_type};base64,"
+                                f"{base64.b64encode(att.content).decode('ascii')}"
+                            ),
+                        },
+                    }
+                    for att in request.attachments
+                ],
+                {"type": "text", "text": request.prompt},
+            ]
+        else:
+            user_content = request.prompt
+
+        messages.append({"role": "user", "content": user_content})
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
