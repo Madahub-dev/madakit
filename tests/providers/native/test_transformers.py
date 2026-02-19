@@ -5,12 +5,16 @@ default device, custom device, _model and _tokenizer initialised to None,
 ThreadPoolExecutor with max_workers=1, _stop_flag initialised to False,
 semaphore support, BaseAgentClient inheritance, __repr__ format, and module
 exports.
+__aenter__ model + tokenizer loading (task 6.2.2) — loads both via executor;
+returns self; deferred import; both None before aenter.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -172,3 +176,86 @@ class TestRepr:
         import mada_modelkit.providers.native.transformers  # noqa: F401
 
         assert "transformers" not in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# TestAenter
+# ---------------------------------------------------------------------------
+
+
+class TestAenter:
+    """TransformersClient.__aenter__ model + tokenizer loading (task 6.2.2)."""
+
+    @pytest.mark.asyncio
+    async def test_aenter_returns_self(self) -> None:
+        """__aenter__ returns the client instance."""
+        client = TransformersClient(model_name="gpt2")
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        with patch.object(client, "_load_model", return_value=(mock_model, mock_tok)):
+            result = await client.__aenter__()
+        assert result is client
+
+    @pytest.mark.asyncio
+    async def test_aenter_sets_model(self) -> None:
+        """_model is set to the value returned by _load_model after __aenter__."""
+        client = TransformersClient(model_name="gpt2")
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        with patch.object(client, "_load_model", return_value=(mock_model, mock_tok)):
+            await client.__aenter__()
+        assert client._model is mock_model
+
+    @pytest.mark.asyncio
+    async def test_aenter_sets_tokenizer(self) -> None:
+        """_tokenizer is set to the value returned by _load_model after __aenter__."""
+        client = TransformersClient(model_name="gpt2")
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        with patch.object(client, "_load_model", return_value=(mock_model, mock_tok)):
+            await client.__aenter__()
+        assert client._tokenizer is mock_tok
+
+    @pytest.mark.asyncio
+    async def test_aenter_calls_load_model_once(self) -> None:
+        """__aenter__ calls _load_model exactly once."""
+        client = TransformersClient(model_name="gpt2")
+        mock_load = MagicMock(return_value=(MagicMock(), MagicMock()))
+        with patch.object(client, "_load_model", mock_load):
+            await client.__aenter__()
+        mock_load.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_aenter_model_was_none_before(self) -> None:
+        """_model is None before __aenter__ is called."""
+        client = TransformersClient(model_name="gpt2")
+        assert client._model is None
+
+    @pytest.mark.asyncio
+    async def test_aenter_tokenizer_was_none_before(self) -> None:
+        """_tokenizer is None before __aenter__ is called."""
+        client = TransformersClient(model_name="gpt2")
+        assert client._tokenizer is None
+
+    @pytest.mark.asyncio
+    async def test_aenter_via_context_manager(self) -> None:
+        """async with sets both _model and _tokenizer via __aenter__."""
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        with patch.object(
+            TransformersClient, "_load_model", return_value=(mock_model, mock_tok)
+        ):
+            async with TransformersClient(model_name="gpt2") as client:
+                assert client._model is mock_model
+                assert client._tokenizer is mock_tok
+
+    @pytest.mark.asyncio
+    async def test_aenter_dispatches_via_executor(self) -> None:
+        """__aenter__ dispatches _load_model through run_in_executor (worker thread)."""
+        client = TransformersClient(model_name="gpt2")
+        call_thread_ids: list[int] = []
+
+        def load_and_record() -> tuple[MagicMock, MagicMock]:
+            """Record the thread id and return mock model + tokenizer."""
+            call_thread_ids.append(threading.current_thread().ident or 0)
+            return MagicMock(), MagicMock()
+
+        with patch.object(client, "_load_model", side_effect=load_and_record):
+            await client.__aenter__()
+        assert call_thread_ids[0] != threading.main_thread().ident
