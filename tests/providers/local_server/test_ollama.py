@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from mada_modelkit._types import AgentRequest, AgentResponse
@@ -178,3 +179,118 @@ class TestRepr:
         """repr returns a str."""
         client = OllamaClient()
         assert isinstance(repr(client), str)
+
+
+# ---------------------------------------------------------------------------
+# TestHealthCheck
+# ---------------------------------------------------------------------------
+
+
+class TestHealthCheck:
+    """OllamaClient.health_check override (task 5.1.2)."""
+
+    @pytest.mark.asyncio
+    async def test_health_check_queries_api_tags(self) -> None:
+        """health_check sends GET to /api/tags, not /."""
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Capture the request path."""
+            captured.append(request)
+            return httpx.Response(200, content=b'{"models":[]}')
+
+        client = OllamaClient()
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:11434",
+            transport=httpx.MockTransport(handler),
+        )
+        await client.health_check()
+        assert captured[0].url.path == "/api/tags"
+
+    @pytest.mark.asyncio
+    async def test_health_check_does_not_query_root(self) -> None:
+        """health_check does NOT send GET to /."""
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Capture the request path."""
+            captured.append(request)
+            return httpx.Response(200, content=b'{"models":[]}')
+
+        client = OllamaClient()
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:11434",
+            transport=httpx.MockTransport(handler),
+        )
+        await client.health_check()
+        assert captured[0].url.path != "/"
+
+    @pytest.mark.asyncio
+    async def test_health_check_returns_true_on_200(self) -> None:
+        """health_check returns True when /api/tags responds with 200."""
+        client = OllamaClient()
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:11434",
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(200, content=b'{"models":[]}')
+            ),
+        )
+        assert await client.health_check() is True
+
+    @pytest.mark.asyncio
+    async def test_health_check_returns_true_on_error_status(self) -> None:
+        """health_check returns True for any HTTP response, including 500."""
+        client = OllamaClient()
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:11434",
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(500, content=b"error")
+            ),
+        )
+        assert await client.health_check() is True
+
+    @pytest.mark.asyncio
+    async def test_health_check_returns_false_on_connect_error(self) -> None:
+        """health_check returns False when the server is unreachable."""
+
+        def raise_connect(request: httpx.Request) -> httpx.Response:
+            """Simulate a connection failure."""
+            raise httpx.ConnectError("refused")
+
+        client = OllamaClient()
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:11434",
+            transport=httpx.MockTransport(raise_connect),
+        )
+        assert await client.health_check() is False
+
+    @pytest.mark.asyncio
+    async def test_health_check_returns_false_on_timeout(self) -> None:
+        """health_check returns False on TimeoutException."""
+
+        def raise_timeout(request: httpx.Request) -> httpx.Response:
+            """Simulate a timeout."""
+            raise httpx.TimeoutException("timed out")
+
+        client = OllamaClient()
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:11434",
+            transport=httpx.MockTransport(raise_timeout),
+        )
+        assert await client.health_check() is False
+
+    @pytest.mark.asyncio
+    async def test_health_check_does_not_raise(self) -> None:
+        """health_check never propagates ConnectError or TimeoutException."""
+
+        def raise_connect(request: httpx.Request) -> httpx.Response:
+            """Always fail."""
+            raise httpx.ConnectError("refused")
+
+        client = OllamaClient()
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:11434",
+            transport=httpx.MockTransport(raise_connect),
+        )
+        result = await client.health_check()
+        assert isinstance(result, bool)

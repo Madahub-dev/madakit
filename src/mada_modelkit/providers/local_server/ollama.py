@@ -9,6 +9,8 @@ model-list endpoint) instead of the default ``GET /``.
 
 from __future__ import annotations
 
+import httpx
+
 from mada_modelkit.providers._http_base import HttpAgentClient
 from mada_modelkit.providers._openai_compat import OpenAICompatMixin
 
@@ -42,6 +44,19 @@ class OllamaClient(OpenAICompatMixin, HttpAgentClient):
         self._model = model
         self._base_url = base_url
         super().__init__(base_url=base_url, **kwargs)  # type: ignore[arg-type]
+
+    async def health_check(self) -> bool:
+        """Return True if the Ollama server is reachable, False otherwise.
+
+        Queries ``GET /api/tags`` (Ollama's model-list endpoint) rather than
+        the default ``GET /`` used by ``HttpAgentClient``. Returns ``True`` for
+        any HTTP response; ``False`` on ``ConnectError`` or ``TimeoutException``.
+        """
+        try:
+            await self._http_client.get("/api/tags")
+            return True
+        except (httpx.ConnectError, httpx.TimeoutException):
+            return False
 
     def __repr__(self) -> str:
         """Return a repr showing the model tag and server base URL."""
