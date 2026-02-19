@@ -9,6 +9,8 @@ __aenter__ model + tokenizer loading (task 6.2.2) — loads both via executor;
 returns self; deferred import; both None before aenter.
 send_request (task 6.2.3) — lazy load fallback; executor dispatch;
 AgentResponse returned; ProviderError wrapping.
+cancel (task 6.2.4) — sets _stop_flag=True; safe regardless of model state;
+_sync_generate resets flag before each call.
 """
 
 from __future__ import annotations
@@ -365,3 +367,72 @@ class TestSendRequest:
         with patch.object(client, "_sync_generate", side_effect=recording_gen):
             await client.send_request(AgentRequest(prompt="Hi"))
         assert call_thread_ids[0] != threading.main_thread().ident
+
+
+# ---------------------------------------------------------------------------
+# TestCancel
+# ---------------------------------------------------------------------------
+
+
+class TestCancel:
+    """TransformersClient.cancel (task 6.2.4)."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_sets_stop_flag(self) -> None:
+        """cancel() sets _stop_flag to True."""
+        client = TransformersClient(model_name="gpt2")
+        assert client._stop_flag is False
+        await client.cancel()
+        assert client._stop_flag is True
+
+    @pytest.mark.asyncio
+    async def test_cancel_is_safe_when_model_is_none(self) -> None:
+        """cancel() does not raise when _model has not been loaded yet."""
+        client = TransformersClient(model_name="gpt2")
+        assert client._model is None
+        await client.cancel()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_cancel_is_safe_when_model_is_loaded(self) -> None:
+        """cancel() does not raise when _model is set."""
+        client = _loaded_client()
+        await client.cancel()  # must not raise
+        assert client._stop_flag is True
+
+    @pytest.mark.asyncio
+    async def test_cancel_callable_multiple_times(self) -> None:
+        """cancel() can be called multiple times without error; flag stays True."""
+        client = TransformersClient(model_name="gpt2")
+        await client.cancel()
+        await client.cancel()
+        await client.cancel()
+        assert client._stop_flag is True
+
+    def test_stop_flag_reset_in_sync_generate(self) -> None:
+        """_sync_generate resets _stop_flag to False before each inference call."""
+        client = _loaded_client()
+        client._stop_flag = True  # simulate a prior cancel()
+
+        # Patch the transformers imports so _sync_generate can run without the library.
+        mock_sc = MagicMock()
+        mock_scl = MagicMock(return_value=MagicMock())
+
+        # Minimal mock tokenizer: returns input_ids tensor-like with shape[-1]=3
+        mock_input_ids = MagicMock()
+        mock_input_ids.shape = (1, 3)
+        client._tokenizer.return_value = {"input_ids": mock_input_ids}
+
+        # Minimal mock model: generate returns output_ids[0][3:] == []
+        mock_output = MagicMock()
+        mock_output.__getitem__ = lambda self, idx: MagicMock(__getitem__=lambda s, i: [])
+        client._model.generate.return_value = mock_output
+
+        import sys
+        fake_transformers = MagicMock()
+        fake_transformers.StoppingCriteria = mock_sc
+        fake_transformers.StoppingCriteriaList = mock_scl
+
+        with patch.dict(sys.modules, {"transformers": fake_transformers}):
+            client._sync_generate(AgentRequest(prompt="Hi"))
+
+        assert client._stop_flag is False
