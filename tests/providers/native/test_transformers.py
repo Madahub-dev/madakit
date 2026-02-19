@@ -12,6 +12,8 @@ AgentResponse returned; ProviderError wrapping.
 cancel (task 6.2.4) — sets _stop_flag=True; safe regardless of model state;
 _sync_generate resets flag before each call.
 close (task 6.2.5) — executor shutdown; _model and _tokenizer cleared; idempotent.
+Comprehensive integration (task 6.2.6) — mocked transformers end-to-end: lazy loading,
+response construction, cancel, close, context manager, Retry stacking.
 """
 
 from __future__ import annotations
@@ -498,3 +500,178 @@ class TestClose:
                 assert client._tokenizer is not None
             assert client._model is None
             assert client._tokenizer is None
+
+
+# ---------------------------------------------------------------------------
+# TestIntegration
+# ---------------------------------------------------------------------------
+
+
+class TestIntegration:
+    """End-to-end integration tests for TransformersClient with mocked transformers."""
+
+    @pytest.mark.asyncio
+    async def test_full_pipeline_via_context_manager(self) -> None:
+        """Context manager loads the model and send_request returns a correct response."""
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        with patch.object(
+            TransformersClient, "_load_model", return_value=(mock_model, mock_tok)
+        ):
+            async with TransformersClient(model_name="gpt2") as client:
+                with patch.object(
+                    client, "_sync_generate", return_value=_fake_response()
+                ):
+                    response = await client.send_request(AgentRequest(prompt="Hello"))
+        assert response.content == "generated text"
+        assert response.model == "gpt2"
+
+    @pytest.mark.asyncio
+    async def test_lazy_load_on_first_send_request(self) -> None:
+        """send_request triggers lazy model loading when called without __aenter__."""
+        client = TransformersClient(model_name="gpt2")
+        assert client._model is None
+        with patch.object(
+            client, "_load_model", return_value=(MagicMock(), MagicMock())
+        ):
+            with patch.object(client, "_sync_generate", return_value=_fake_response()):
+                await client.send_request(AgentRequest(prompt="Hi"))
+        assert client._model is not None
+        assert client._tokenizer is not None
+
+    @pytest.mark.asyncio
+    async def test_model_loaded_only_once_across_requests(self) -> None:
+        """Multiple send_request calls reuse the same loaded model without re-loading."""
+        mock_load = MagicMock(return_value=(MagicMock(), MagicMock()))
+        client = TransformersClient(model_name="gpt2")
+        with patch.object(client, "_load_model", mock_load):
+            with patch.object(client, "_sync_generate", return_value=_fake_response()):
+                await client.send_request(AgentRequest(prompt="First"))
+                await client.send_request(AgentRequest(prompt="Second"))
+                await client.send_request(AgentRequest(prompt="Third"))
+        mock_load.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_token_counts_propagated(self) -> None:
+        """input_tokens, output_tokens, and total_tokens are correctly propagated."""
+        response = AgentResponse(
+            content="hi", model="gpt2", input_tokens=20, output_tokens=10
+        )
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        with patch.object(
+            TransformersClient, "_load_model", return_value=(mock_model, mock_tok)
+        ):
+            async with TransformersClient(model_name="gpt2") as client:
+                with patch.object(client, "_sync_generate", return_value=response):
+                    result = await client.send_request(AgentRequest(prompt="Count"))
+        assert result.input_tokens == 20
+        assert result.output_tokens == 10
+        assert result.total_tokens == 30
+
+    @pytest.mark.asyncio
+    async def test_cancel_sets_stop_flag_in_pipeline(self) -> None:
+        """cancel() sets _stop_flag=True in the end-to-end flow."""
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        with patch.object(
+            TransformersClient, "_load_model", return_value=(mock_model, mock_tok)
+        ):
+            async with TransformersClient(model_name="gpt2") as client:
+                assert client._stop_flag is False
+                await client.cancel()
+                assert client._stop_flag is True
+
+    @pytest.mark.asyncio
+    async def test_close_releases_model_and_tokenizer(self) -> None:
+        """After close(), _model and _tokenizer are None."""
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        client = TransformersClient(model_name="gpt2")
+        with patch.object(client, "_load_model", return_value=(mock_model, mock_tok)):
+            await client.__aenter__()
+            assert client._model is not None
+            assert client._tokenizer is not None
+            await client.close()
+        assert client._model is None
+        assert client._tokenizer is None
+
+    @pytest.mark.asyncio
+    async def test_context_manager_closes_on_exception(self) -> None:
+        """__aexit__ calls close() even when an exception is raised inside the block."""
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        client_ref: list[TransformersClient] = []
+        with patch.object(
+            TransformersClient, "_load_model", return_value=(mock_model, mock_tok)
+        ):
+            with pytest.raises(ValueError, match="inner error"):
+                async with TransformersClient(model_name="gpt2") as client:
+                    client_ref.append(client)
+                    raise ValueError("inner error")
+        assert client_ref[0]._model is None
+        assert client_ref[0]._tokenizer is None
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_yields_full_content(self) -> None:
+        """send_request_stream (inherited default) yields one final chunk with full content."""
+        chunks: list = []
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        with patch.object(
+            TransformersClient, "_load_model", return_value=(mock_model, mock_tok)
+        ):
+            async with TransformersClient(model_name="gpt2") as client:
+                with patch.object(
+                    client, "_sync_generate", return_value=_fake_response()
+                ):
+                    async for chunk in client.send_request_stream(
+                        AgentRequest(prompt="Stream me")
+                    ):
+                        chunks.append(chunk)
+        assert len(chunks) == 1
+        assert chunks[0].delta == "generated text"
+        assert chunks[0].is_final is True
+
+    @pytest.mark.asyncio
+    async def test_provider_error_on_inference_failure(self) -> None:
+        """ProviderError is raised when _sync_generate raises an exception."""
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        with patch.object(
+            TransformersClient, "_load_model", return_value=(mock_model, mock_tok)
+        ):
+            async with TransformersClient(model_name="gpt2") as client:
+                with patch.object(
+                    client, "_sync_generate", side_effect=RuntimeError("CUDA OOM")
+                ):
+                    with pytest.raises(ProviderError, match="CUDA OOM"):
+                        await client.send_request(AgentRequest(prompt="Crash"))
+
+    @pytest.mark.asyncio
+    async def test_stacked_with_retry_middleware(self) -> None:
+        """TransformersClient works correctly when wrapped with RetryMiddleware."""
+        from mada_modelkit.middleware.retry import RetryMiddleware
+
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        with patch.object(
+            TransformersClient, "_load_model", return_value=(mock_model, mock_tok)
+        ):
+            async with TransformersClient(model_name="gpt2") as tc:
+                with patch.object(tc, "_sync_generate", return_value=_fake_response()):
+                    retry_client = RetryMiddleware(tc, max_retries=1)
+                    response = await retry_client.send_request(AgentRequest(prompt="Hi"))
+        assert response.content == "generated text"
+
+    @pytest.mark.asyncio
+    async def test_model_name_in_response(self) -> None:
+        """AgentResponse.model reflects the model_name exactly."""
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        response = AgentResponse(
+            content="hi",
+            model="meta-llama/Llama-2-7b-hf",
+            input_tokens=5,
+            output_tokens=3,
+        )
+        with patch.object(
+            TransformersClient, "_load_model", return_value=(mock_model, mock_tok)
+        ):
+            async with TransformersClient(
+                model_name="meta-llama/Llama-2-7b-hf"
+            ) as client:
+                with patch.object(client, "_sync_generate", return_value=response):
+                    result = await client.send_request(AgentRequest(prompt="Hi"))
+        assert result.model == "meta-llama/Llama-2-7b-hf"
