@@ -12,11 +12,13 @@ Comprehensive integration (task 5.1.4) — full round-trip via MockTransport.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
 
-from mada_modelkit._types import AgentRequest, AgentResponse
+from mada_modelkit._errors import ProviderError
+from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
 from mada_modelkit.providers._http_base import HttpAgentClient
 from mada_modelkit.providers._openai_compat import OpenAICompatMixin
 from mada_modelkit.providers.local_server.ollama import OllamaClient
@@ -294,3 +296,157 @@ class TestHealthCheck:
         )
         result = await client.health_check()
         assert isinstance(result, bool)
+
+
+# ---------------------------------------------------------------------------
+# SSE helpers
+# ---------------------------------------------------------------------------
+
+
+def _sse_bytes(*deltas: str) -> bytes:
+    """Build a minimal OpenAI-compat SSE byte stream from delta strings."""
+    lines: list[bytes] = []
+    for delta in deltas:
+        chunk = json.dumps({"choices": [{"delta": {"content": delta}}]})
+        lines.append(f"data: {chunk}\n\n".encode())
+    lines.append(b"data: [DONE]\n\n")
+    return b"".join(lines)
+
+
+def _streaming_client(body: bytes) -> OllamaClient:
+    """Return an OllamaClient whose _http_client streams *body* via MockTransport."""
+    client = OllamaClient()
+    client._http_client = httpx.AsyncClient(
+        base_url="http://localhost:11434/v1",
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, content=body)
+        ),
+    )
+    return client
+
+
+# ---------------------------------------------------------------------------
+# TestSendRequestStream
+# ---------------------------------------------------------------------------
+
+
+class TestSendRequestStream:
+    """OllamaClient.send_request_stream SSE (task 5.1.3)."""
+
+    @pytest.mark.asyncio
+    async def test_stream_yields_stream_chunks(self) -> None:
+        """send_request_stream yields StreamChunk objects."""
+        client = _streaming_client(_sse_bytes("Hello"))
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="Hi"))]
+        assert all(isinstance(c, StreamChunk) for c in chunks)
+
+    @pytest.mark.asyncio
+    async def test_stream_yields_correct_deltas(self) -> None:
+        """Each SSE data line produces a StreamChunk with the correct delta."""
+        client = _streaming_client(_sse_bytes("Hello", " world"))
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="Hi"))]
+        non_final = [c for c in chunks if not c.is_final]
+        assert [c.delta for c in non_final] == ["Hello", " world"]
+
+    @pytest.mark.asyncio
+    async def test_stream_final_chunk_on_done(self) -> None:
+        """[DONE] sentinel produces a final StreamChunk with empty delta."""
+        client = _streaming_client(_sse_bytes("Hi"))
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="Hi"))]
+        assert chunks[-1].is_final is True
+        assert chunks[-1].delta == ""
+
+    @pytest.mark.asyncio
+    async def test_stream_non_final_chunks_have_is_final_false(self) -> None:
+        """Content chunks have is_final=False."""
+        client = _streaming_client(_sse_bytes("A", "B"))
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="Hi"))]
+        assert all(not c.is_final for c in chunks[:-1])
+
+    @pytest.mark.asyncio
+    async def test_stream_payload_includes_stream_true(self) -> None:
+        """Payload sent to the server includes stream=True."""
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Capture the request."""
+            captured.append(request)
+            return httpx.Response(200, content=_sse_bytes("ok"))
+
+        client = OllamaClient()
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:11434/v1",
+            transport=httpx.MockTransport(handler),
+        )
+        async for _ in client.send_request_stream(AgentRequest(prompt="Hi")):
+            pass
+        assert json.loads(captured[0].content)["stream"] is True
+
+    @pytest.mark.asyncio
+    async def test_stream_routes_to_chat_completions(self) -> None:
+        """Streaming POST is sent to /chat/completions."""
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Capture the request."""
+            captured.append(request)
+            return httpx.Response(200, content=_sse_bytes("ok"))
+
+        client = OllamaClient()
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:11434/v1",
+            transport=httpx.MockTransport(handler),
+        )
+        async for _ in client.send_request_stream(AgentRequest(prompt="Hi")):
+            pass
+        assert captured[0].url.path.endswith("/chat/completions")
+
+    @pytest.mark.asyncio
+    async def test_stream_non_2xx_raises_provider_error(self) -> None:
+        """A non-2xx response during streaming raises ProviderError."""
+        client = OllamaClient()
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:11434/v1",
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(503, content=b"unavailable")
+            ),
+        )
+        with pytest.raises(ProviderError):
+            async for _ in client.send_request_stream(AgentRequest(prompt="Hi")):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_stream_connect_error_raises_provider_error(self) -> None:
+        """ConnectError during streaming is wrapped as ProviderError."""
+
+        def raise_connect(r: httpx.Request) -> httpx.Response:
+            """Simulate connection failure."""
+            raise httpx.ConnectError("refused")
+
+        client = OllamaClient()
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:11434/v1",
+            transport=httpx.MockTransport(raise_connect),
+        )
+        with pytest.raises(ProviderError):
+            async for _ in client.send_request_stream(AgentRequest(prompt="Hi")):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_stream_skips_non_data_lines(self) -> None:
+        """Lines that don't start with 'data:' are silently ignored."""
+        body = b"event: ping\n\n" + _sse_bytes("hello")
+        client = _streaming_client(body)
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="Hi"))]
+        non_final = [c for c in chunks if not c.is_final]
+        assert len(non_final) == 1
+        assert non_final[0].delta == "hello"
+
+    @pytest.mark.asyncio
+    async def test_stream_empty_delta_fields_yield_empty_string(self) -> None:
+        """Delta chunks with no 'content' key yield delta=''."""
+        body = b'data: {"choices":[{"delta":{}}]}\n\ndata: [DONE]\n\n'
+        client = _streaming_client(body)
+        chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="Hi"))]
+        non_final = [c for c in chunks if not c.is_final]
+        assert non_final[0].delta == ""
