@@ -1,11 +1,13 @@
-"""Tests for OpenAIClient constructor (task 4.1.1).
+"""Tests for OpenAIClient constructor and __repr__ (tasks 4.1.1–4.1.2).
 
 Covers: OpenAICompatMixin and HttpAgentClient inheritance, default model
 "gpt-4o-mini", custom model stored as _model, api_key stored as _api_key,
 _require_tls class variable is True, base_url fixed to api.openai.com/v1,
 Authorization Bearer header set from api_key, http:// URL rejected by TLS
 enforcement, kwargs forwarded (connect_timeout, read_timeout, max_concurrent),
-httpx.AsyncClient created, per-instance client independence.
+httpx.AsyncClient created, per-instance client independence; __repr__:
+format "OpenAIClient(model=..., api_key=***)", key not present, model
+present, is a str.
 """
 
 from __future__ import annotations
@@ -128,6 +130,45 @@ class TestOpenAIClientConstructor:
             c1._http_client.headers["authorization"]
             != c2._http_client.headers["authorization"]
         )
+
+
+class TestRepr:
+    """OpenAIClient.__repr__ — key redaction and model visibility."""
+
+    def test_repr_is_str(self) -> None:
+        """Asserts that repr() returns a str."""
+        client = OpenAIClient(api_key="sk-secret")
+        assert isinstance(repr(client), str)
+
+    def test_repr_contains_class_name(self) -> None:
+        """Asserts that the repr starts with 'OpenAIClient'."""
+        client = OpenAIClient(api_key="sk-secret")
+        assert repr(client).startswith("OpenAIClient")
+
+    def test_repr_contains_model(self) -> None:
+        """Asserts that the model name appears in the repr."""
+        client = OpenAIClient(api_key="sk-secret", model="gpt-4o")
+        assert "gpt-4o" in repr(client)
+
+    def test_repr_does_not_contain_api_key(self) -> None:
+        """Asserts that the actual api_key value is not present in the repr."""
+        client = OpenAIClient(api_key="sk-super-secret")
+        assert "sk-super-secret" not in repr(client)
+
+    def test_repr_contains_redacted_placeholder(self) -> None:
+        """Asserts that the repr contains '***' in place of the key."""
+        client = OpenAIClient(api_key="sk-secret")
+        assert "***" in repr(client)
+
+    def test_repr_format(self) -> None:
+        """Asserts the exact repr format: OpenAIClient(model=..., api_key=***)."""
+        client = OpenAIClient(api_key="sk-secret", model="gpt-4o-mini")
+        assert repr(client) == "OpenAIClient(model='gpt-4o-mini', api_key=***)"
+
+    def test_repr_reflects_custom_model(self) -> None:
+        """Asserts that the repr reflects a non-default model name."""
+        client = OpenAIClient(api_key="sk-x", model="o1-mini")
+        assert "o1-mini" in repr(client)
 
 
 class TestModuleExports:
