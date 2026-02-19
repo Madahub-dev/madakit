@@ -9,6 +9,7 @@ _parse_response (task 4.2.3) — content[0].text extraction, model fallback,
 input_tokens/output_tokens defaults.
 Attachment support (task 4.2.4) — Attachment mapped to Anthropic image source
 blocks (base64-encoded bytes, media_type), text block appended after images.
+__repr__ (task 4.2.5) — API key redacted, model visible, exact format.
 """
 
 from __future__ import annotations
@@ -165,6 +166,56 @@ class TestAnthropicClientConstructor:
 
 # ---------------------------------------------------------------------------
 # TestBuildPayload
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# TestRepr
+# ---------------------------------------------------------------------------
+
+
+class TestRepr:
+    """AnthropicClient.__repr__ (task 4.2.5)."""
+
+    def test_repr_does_not_contain_api_key(self) -> None:
+        """repr output does not expose the raw API key."""
+        client = AnthropicClient(api_key="sk-ant-secret")
+        assert "sk-ant-secret" not in repr(client)
+
+    def test_repr_contains_redacted_placeholder(self) -> None:
+        """repr contains '***' in place of the API key."""
+        client = AnthropicClient(api_key="sk-ant-secret")
+        assert "***" in repr(client)
+
+    def test_repr_contains_model(self) -> None:
+        """repr contains the model identifier."""
+        client = AnthropicClient(api_key="sk-ant-test", model="claude-opus-4-6")
+        assert "claude-opus-4-6" in repr(client)
+
+    def test_repr_exact_format_default_model(self) -> None:
+        """repr matches the expected format with the default model."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        assert repr(client) == "AnthropicClient(model='claude-sonnet-4-6', api_key=***)"
+
+    def test_repr_exact_format_custom_model(self) -> None:
+        """repr reflects a custom model in the exact format."""
+        client = AnthropicClient(api_key="sk-ant-test", model="claude-haiku-4-5-20251001")
+        assert repr(client) == "AnthropicClient(model='claude-haiku-4-5-20251001', api_key=***)"
+
+    def test_repr_different_keys_same_output(self) -> None:
+        """Two clients with different keys produce identical repr output."""
+        a = AnthropicClient(api_key="key-one")
+        b = AnthropicClient(api_key="key-two")
+        assert repr(a) == repr(b)
+
+    def test_repr_is_string(self) -> None:
+        """repr returns a str."""
+        client = AnthropicClient(api_key="sk-ant-test")
+        assert isinstance(repr(client), str)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for payload / response tests
 # ---------------------------------------------------------------------------
 
 

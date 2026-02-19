@@ -53,6 +53,10 @@ class AnthropicClient(HttpAgentClient):
             **kwargs,  # type: ignore[arg-type]
         )
 
+    def __repr__(self) -> str:
+        """Return a repr with the API key redacted."""
+        return f"AnthropicClient(model={self._model!r}, api_key=***)"
+
     def _endpoint(self) -> str:
         """Return the Anthropic messages endpoint path."""
         return "/messages"
