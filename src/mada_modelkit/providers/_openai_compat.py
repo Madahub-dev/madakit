@@ -64,5 +64,5 @@ class OpenAICompatMixin:
         )
 
     def _endpoint(self) -> str:
-        """Return the chat-completions endpoint path (stub; task 3.2.3)."""
-        raise NotImplementedError
+        """Return the OpenAI chat-completions endpoint path."""
+        return "/chat/completions"

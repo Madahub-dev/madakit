@@ -1,4 +1,4 @@
-"""Tests for OpenAICompatMixin._build_payload and _parse_response (tasks 3.2.1–3.2.2).
+"""Tests for OpenAICompatMixin._build_payload, _parse_response, and _endpoint (tasks 3.2.1–3.2.3).
 
 Covers: messages list structure with and without system_prompt, user message
 always present, model field from _model attribute, max_tokens and temperature
@@ -6,7 +6,8 @@ fields, stop key absent when stop=None, stop key present and correct when
 stop is a list; _parse_response: content from choices[0].message.content,
 model from data["model"] with fallback to _model, input_tokens from
 usage.prompt_tokens (default 0), output_tokens from usage.completion_tokens
-(default 0), AgentResponse type returned.
+(default 0), AgentResponse type returned; _endpoint: returns the string
+"/chat/completions", is a str, starts with "/".
 """
 
 from __future__ import annotations
@@ -275,3 +276,22 @@ class TestParseResponse:
         client = _ConcreteCompat()
         result = client._parse_response(_make_response(prompt_tokens=10, completion_tokens=5))
         assert result.total_tokens == 15
+
+
+class TestEndpoint:
+    """OpenAICompatMixin._endpoint — chat-completions path value."""
+
+    def test_endpoint_returns_chat_completions(self) -> None:
+        """Asserts that _endpoint returns '/chat/completions'."""
+        client = _ConcreteCompat()
+        assert client._endpoint() == "/chat/completions"
+
+    def test_endpoint_returns_str(self) -> None:
+        """Asserts that _endpoint returns a str."""
+        client = _ConcreteCompat()
+        assert isinstance(client._endpoint(), str)
+
+    def test_endpoint_starts_with_slash(self) -> None:
+        """Asserts that the endpoint path starts with '/'."""
+        client = _ConcreteCompat()
+        assert client._endpoint().startswith("/")
