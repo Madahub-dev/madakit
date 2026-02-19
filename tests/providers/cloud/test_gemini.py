@@ -9,15 +9,21 @@ stopSequences, inlineData attachment blocks.
 _parse_response (task 4.3.3) — candidates[0].content.parts[0].text extraction,
 modelVersion with _model fallback, promptTokenCount/candidatesTokenCount defaults.
 __repr__ (task 4.3.4) — API key redacted, model visible, exact format.
+Comprehensive integration (task 4.3.5) — full round-trip via MockTransport:
+dynamic endpoint routing, x-goog-api-key header, Gemini payload format,
+inlineData attachment, health_check, context manager, token counts. Mock HTTP.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64 as _base64
+import json
 
+import httpx
 import pytest
 
+from mada_modelkit._errors import ProviderError
 from mada_modelkit._types import AgentRequest, AgentResponse, Attachment
 from mada_modelkit.providers._http_base import HttpAgentClient
 from mada_modelkit.providers.cloud.gemini import GeminiClient
@@ -489,3 +495,167 @@ class TestParseResponse:
             _make_gemini_response(prompt_tokens=20, candidates_tokens=30)
         )
         assert result.total_tokens == 50
+
+
+# ---------------------------------------------------------------------------
+# TestIntegration
+# ---------------------------------------------------------------------------
+
+
+def _gemini_json_response(
+    text: str = "Hello",
+    model_version: str = "gemini-2.0-flash",
+    prompt_tokens: int = 10,
+    candidates_tokens: int = 5,
+) -> bytes:
+    """Return a minimal Gemini generateContent JSON response as bytes."""
+    return json.dumps(
+        {
+            "candidates": [
+                {
+                    "content": {"parts": [{"text": text}], "role": "model"},
+                    "finishReason": "STOP",
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": prompt_tokens,
+                "candidatesTokenCount": candidates_tokens,
+                "totalTokenCount": prompt_tokens + candidates_tokens,
+            },
+            "modelVersion": model_version,
+        }
+    ).encode()
+
+
+def _make_client(
+    handler: httpx.MockTransport | None = None,
+    api_key: str = "AIza-test",
+    model: str = "gemini-2.0-flash",
+) -> GeminiClient:
+    """Return a GeminiClient with an injected MockTransport."""
+    if handler is None:
+        handler = httpx.MockTransport(
+            lambda r: httpx.Response(200, content=_gemini_json_response())
+        )
+    client = GeminiClient(api_key=api_key, model=model)
+    client._http_client = httpx.AsyncClient(
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+        transport=handler,
+        headers={"x-goog-api-key": api_key},
+    )
+    return client
+
+
+class TestIntegration:
+    """End-to-end integration tests for GeminiClient using MockTransport."""
+
+    async def test_send_request_returns_agent_response(self) -> None:
+        """send_request returns an AgentResponse with the parsed content."""
+        client = _make_client()
+        result = await client.send_request(AgentRequest(prompt="Hi"))
+        assert isinstance(result, AgentResponse)
+        assert result.content == "Hello"
+
+    async def test_send_request_posts_to_generate_content_endpoint(self) -> None:
+        """send_request issues a POST to /models/{model}:generateContent."""
+        captured: list[str] = []
+
+        def handler(r: httpx.Request) -> httpx.Response:
+            captured.append(r.url.path)
+            return httpx.Response(200, content=_gemini_json_response())
+
+        client = _make_client(httpx.MockTransport(handler), model="gemini-1.5-pro")
+        await client.send_request(AgentRequest(prompt="Hi"))
+        assert "gemini-1.5-pro" in captured[0]
+        assert captured[0].endswith(":generateContent")
+
+    async def test_send_request_forwards_x_goog_api_key_header(self) -> None:
+        """send_request includes the x-goog-api-key header in every request."""
+        captured: list[str] = []
+
+        def handler(r: httpx.Request) -> httpx.Response:
+            captured.append(r.headers.get("x-goog-api-key", ""))
+            return httpx.Response(200, content=_gemini_json_response())
+
+        client = _make_client(httpx.MockTransport(handler), api_key="AIza-mykey")
+        await client.send_request(AgentRequest(prompt="Hi"))
+        assert captured[0] == "AIza-mykey"
+
+    async def test_send_request_payload_uses_gemini_format(self) -> None:
+        """Payload contains 'contents' array (not 'messages') per Gemini format."""
+        captured: list[dict] = []
+
+        def handler(r: httpx.Request) -> httpx.Response:
+            captured.append(json.loads(r.content))
+            return httpx.Response(200, content=_gemini_json_response())
+
+        client = _make_client(httpx.MockTransport(handler))
+        await client.send_request(
+            AgentRequest(prompt="Hello", system_prompt="Be helpful")
+        )
+        payload = captured[0]
+        assert "contents" in payload
+        assert "systemInstruction" in payload
+        assert "messages" not in payload
+
+    async def test_send_request_with_attachment_sends_inline_data(self) -> None:
+        """When request has an attachment, payload parts contain an inlineData block."""
+        captured: list[dict] = []
+
+        def handler(r: httpx.Request) -> httpx.Response:
+            captured.append(json.loads(r.content))
+            return httpx.Response(200, content=_gemini_json_response())
+
+        client = _make_client(httpx.MockTransport(handler))
+        att = Attachment(content=b"imgdata", media_type="image/png")
+        await client.send_request(AgentRequest(prompt="Describe", attachments=[att]))
+        parts = captured[0]["contents"][0]["parts"]
+        assert any("inlineData" in p for p in parts)
+
+    async def test_send_request_raises_provider_error_on_non_2xx(self) -> None:
+        """send_request wraps a non-2xx response as ProviderError with status_code."""
+        client = _make_client(
+            httpx.MockTransport(lambda r: httpx.Response(403, content=b"Forbidden"))
+        )
+        with pytest.raises(ProviderError) as exc_info:
+            await client.send_request(AgentRequest(prompt="Hi"))
+        assert exc_info.value.status_code == 403
+
+    async def test_health_check_returns_true_on_200(self) -> None:
+        """health_check returns True when the server responds with 200."""
+        client = _make_client(
+            httpx.MockTransport(lambda r: httpx.Response(200, content=b"{}"))
+        )
+        assert await client.health_check() is True
+
+    async def test_health_check_returns_false_on_connect_error(self) -> None:
+        """health_check returns False on ConnectError."""
+        def handler(r: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("refused")
+
+        client = _make_client(httpx.MockTransport(handler))
+        assert await client.health_check() is False
+
+    async def test_context_manager_closes_http_client(self) -> None:
+        """Using GeminiClient as a context manager closes the httpx client."""
+        async with GeminiClient(api_key="AIza-test") as client:
+            is_closed_inside = client._http_client.is_closed
+        assert not is_closed_inside
+        assert client._http_client.is_closed
+
+    async def test_token_counts_flow_to_agent_response(self) -> None:
+        """Token counts from the Gemini response reach AgentResponse."""
+        client = _make_client(
+            httpx.MockTransport(
+                lambda r: httpx.Response(
+                    200,
+                    content=_gemini_json_response(
+                        prompt_tokens=30, candidates_tokens=45
+                    ),
+                )
+            )
+        )
+        result = await client.send_request(AgentRequest(prompt="Hi"))
+        assert result.input_tokens == 30
+        assert result.output_tokens == 45
+        assert result.total_tokens == 75
