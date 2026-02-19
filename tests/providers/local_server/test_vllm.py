@@ -175,3 +175,190 @@ class TestRepr:
         """repr returns a str."""
         client = VllmClient(model="llama")
         assert isinstance(repr(client), str)
+
+
+# ---------------------------------------------------------------------------
+# Integration helpers
+# ---------------------------------------------------------------------------
+
+
+def _openai_json_response(
+    content: str = "Hello from vLLM",
+    model: str = "llama",
+    prompt_tokens: int = 10,
+    completion_tokens: int = 5,
+) -> bytes:
+    """Return a minimal OpenAI-compat JSON response as bytes."""
+    return json.dumps(
+        {
+            "choices": [{"message": {"content": content}}],
+            "model": model,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            },
+        }
+    ).encode()
+
+
+def _make_client(model: str = "llama", *, body: bytes | None = None) -> VllmClient:
+    """Return a VllmClient whose _http_client uses a MockTransport."""
+    if body is None:
+        body = _openai_json_response(model=model)
+    client = VllmClient(model=model)
+    client._http_client = httpx.AsyncClient(
+        base_url="http://localhost:8000/v1",
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, content=body)
+        ),
+    )
+    return client
+
+
+# ---------------------------------------------------------------------------
+# TestIntegration
+# ---------------------------------------------------------------------------
+
+
+class TestIntegration:
+    """Full round-trip tests for VllmClient via MockTransport (task 5.2.2)."""
+
+    @pytest.mark.asyncio
+    async def test_send_request_returns_agent_response(self) -> None:
+        """send_request returns an AgentResponse for a basic prompt."""
+        client = _make_client()
+        response = await client.send_request(AgentRequest(prompt="Hi"))
+        assert isinstance(response, AgentResponse)
+
+    @pytest.mark.asyncio
+    async def test_send_request_content_matches_body(self) -> None:
+        """AgentResponse.content equals the text from the response body."""
+        body = _openai_json_response(content="vLLM says hi")
+        client = _make_client(body=body)
+        response = await client.send_request(AgentRequest(prompt="Hi"))
+        assert response.content == "vLLM says hi"
+
+    @pytest.mark.asyncio
+    async def test_send_request_routes_to_chat_completions(self) -> None:
+        """send_request POSTs to /chat/completions."""
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Capture the request."""
+            captured.append(request)
+            return httpx.Response(200, content=_openai_json_response())
+
+        client = VllmClient(model="llama")
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:8000/v1",
+            transport=httpx.MockTransport(handler),
+        )
+        await client.send_request(AgentRequest(prompt="Hi"))
+        assert captured[0].url.path.endswith("/chat/completions")
+
+    @pytest.mark.asyncio
+    async def test_no_authorization_header_in_request(self) -> None:
+        """No Authorization header is present in the outgoing request."""
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Capture the request."""
+            captured.append(request)
+            return httpx.Response(200, content=_openai_json_response())
+
+        client = VllmClient(model="llama")
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:8000/v1",
+            transport=httpx.MockTransport(handler),
+        )
+        await client.send_request(AgentRequest(prompt="Hi"))
+        assert "authorization" not in captured[0].headers
+
+    @pytest.mark.asyncio
+    async def test_payload_uses_openai_compat_format(self) -> None:
+        """Request body follows OpenAI-compat format with 'model' and 'messages'."""
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Capture the request."""
+            captured.append(request)
+            return httpx.Response(200, content=_openai_json_response())
+
+        client = VllmClient(model="llama")
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:8000/v1",
+            transport=httpx.MockTransport(handler),
+        )
+        await client.send_request(AgentRequest(prompt="Hello"))
+        payload = json.loads(captured[0].content)
+        assert payload["model"] == "llama"
+        assert payload["messages"][0]["role"] == "user"
+
+    @pytest.mark.asyncio
+    async def test_attachment_produces_image_url_block(self) -> None:
+        """An Attachment is serialised as an image_url content block."""
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Capture the request."""
+            captured.append(request)
+            return httpx.Response(200, content=_openai_json_response())
+
+        client = VllmClient(model="llama")
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:8000/v1",
+            transport=httpx.MockTransport(handler),
+        )
+        att = Attachment(content=b"\xff\xd8\xff", media_type="image/jpeg")
+        await client.send_request(AgentRequest(prompt="Describe", attachments=[att]))
+        payload = json.loads(captured[0].content)
+        content_blocks = payload["messages"][0]["content"]
+        assert any(block.get("type") == "image_url" for block in content_blocks)
+
+    @pytest.mark.asyncio
+    async def test_non_2xx_raises_provider_error(self) -> None:
+        """A non-2xx HTTP response raises ProviderError."""
+        client = VllmClient(model="llama")
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:8000/v1",
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(503, content=b'{"error": "unavailable"}')
+            ),
+        )
+        with pytest.raises(ProviderError):
+            await client.send_request(AgentRequest(prompt="Hi"))
+
+    @pytest.mark.asyncio
+    async def test_token_counts_populated(self) -> None:
+        """AgentResponse carries prompt and completion token counts."""
+        body = _openai_json_response(prompt_tokens=20, completion_tokens=9)
+        client = _make_client(body=body)
+        response = await client.send_request(AgentRequest(prompt="Count"))
+        assert response.input_tokens == 20
+        assert response.output_tokens == 9
+
+    @pytest.mark.asyncio
+    async def test_model_field_in_response(self) -> None:
+        """AgentResponse.model is taken from the JSON 'model' field."""
+        body = _openai_json_response(model="meta-llama/Llama-3.2-3B-Instruct")
+        client = _make_client(body=body)
+        response = await client.send_request(AgentRequest(prompt="Hi"))
+        assert response.model == "meta-llama/Llama-3.2-3B-Instruct"
+
+    @pytest.mark.asyncio
+    async def test_health_check_returns_true_on_200(self) -> None:
+        """health_check (inherited GET /) returns True on 200."""
+        client = VllmClient(model="llama")
+        client._http_client = httpx.AsyncClient(
+            base_url="http://localhost:8000/v1",
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(200, content=b"ok")
+            ),
+        )
+        assert await client.health_check() is True
+
+    @pytest.mark.asyncio
+    async def test_context_manager_closes_cleanly(self) -> None:
+        """VllmClient works as an async context manager without error."""
+        async with VllmClient(model="llama") as client:
+            assert client is not None
