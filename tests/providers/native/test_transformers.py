@@ -11,6 +11,7 @@ send_request (task 6.2.3) — lazy load fallback; executor dispatch;
 AgentResponse returned; ProviderError wrapping.
 cancel (task 6.2.4) — sets _stop_flag=True; safe regardless of model state;
 _sync_generate resets flag before each call.
+close (task 6.2.5) — executor shutdown; _model and _tokenizer cleared; idempotent.
 """
 
 from __future__ import annotations
@@ -436,3 +437,64 @@ class TestCancel:
             client._sync_generate(AgentRequest(prompt="Hi"))
 
         assert client._stop_flag is False
+
+
+# ---------------------------------------------------------------------------
+# TestClose
+# ---------------------------------------------------------------------------
+
+
+class TestClose:
+    """TransformersClient.close (task 6.2.5)."""
+
+    @pytest.mark.asyncio
+    async def test_close_sets_model_to_none(self) -> None:
+        """close() sets _model to None, releasing the model reference."""
+        client = _loaded_client()
+        assert client._model is not None
+        await client.close()
+        assert client._model is None
+
+    @pytest.mark.asyncio
+    async def test_close_sets_tokenizer_to_none(self) -> None:
+        """close() sets _tokenizer to None, releasing the tokenizer reference."""
+        client = _loaded_client()
+        assert client._tokenizer is not None
+        await client.close()
+        assert client._tokenizer is None
+
+    @pytest.mark.asyncio
+    async def test_close_shuts_down_executor(self) -> None:
+        """close() calls executor.shutdown(wait=False)."""
+        client = _loaded_client()
+        with patch.object(client._executor, "shutdown") as mock_shutdown:
+            await client.close()
+        mock_shutdown.assert_called_once_with(wait=False)
+
+    @pytest.mark.asyncio
+    async def test_close_is_noop_when_already_none(self) -> None:
+        """close() does not raise when _model and _tokenizer are already None."""
+        client = TransformersClient(model_name="gpt2")
+        assert client._model is None
+        assert client._tokenizer is None
+        await client.close()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_close_callable_multiple_times(self) -> None:
+        """close() can be called multiple times without error."""
+        client = _loaded_client()
+        await client.close()
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_context_manager_calls_close(self) -> None:
+        """__aexit__ invokes close(), setting _model and _tokenizer to None."""
+        mock_model, mock_tok = MagicMock(), MagicMock()
+        with patch.object(
+            TransformersClient, "_load_model", return_value=(mock_model, mock_tok)
+        ):
+            async with TransformersClient(model_name="gpt2") as client:
+                assert client._model is not None
+                assert client._tokenizer is not None
+            assert client._model is None
+            assert client._tokenizer is None
