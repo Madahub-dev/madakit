@@ -6,6 +6,8 @@ forwarding, semaphore creation, dynamic _endpoint per model, and module exports.
 _build_payload (task 4.3.2) — Gemini wire format: contents/parts structure,
 systemInstruction top-level field, generationConfig with maxOutputTokens and
 stopSequences, inlineData attachment blocks.
+_parse_response (task 4.3.3) — candidates[0].content.parts[0].text extraction,
+modelVersion with _model fallback, promptTokenCount/candidatesTokenCount defaults.
 """
 
 from __future__ import annotations
@@ -338,3 +340,106 @@ class TestBuildPayload:
         payload = client._build_payload(_make_request(attachments=atts))
         parts = payload["contents"][0]["parts"]
         assert len(parts) == 4  # 3 images + 1 text
+
+
+# ---------------------------------------------------------------------------
+# TestParseResponse
+# ---------------------------------------------------------------------------
+
+
+def _make_gemini_response(
+    text: str = "Hello",
+    model_version: str = "gemini-2.0-flash",
+    prompt_tokens: int = 10,
+    candidates_tokens: int = 5,
+) -> dict:  # type: ignore[type-arg]
+    """Return a minimal Gemini generateContent response dict."""
+    return {
+        "candidates": [
+            {
+                "content": {"parts": [{"text": text}], "role": "model"},
+                "finishReason": "STOP",
+            }
+        ],
+        "usageMetadata": {
+            "promptTokenCount": prompt_tokens,
+            "candidatesTokenCount": candidates_tokens,
+            "totalTokenCount": prompt_tokens + candidates_tokens,
+        },
+        "modelVersion": model_version,
+    }
+
+
+class TestParseResponse:
+    """GeminiClient._parse_response (task 4.3.3)."""
+
+    def test_returns_agent_response(self) -> None:
+        """_parse_response returns an AgentResponse instance."""
+        client = GeminiClient(api_key="AIza-test")
+        result = client._parse_response(_make_gemini_response())
+        assert isinstance(result, AgentResponse)
+
+    def test_content_from_candidates_parts_text(self) -> None:
+        """content is extracted from candidates[0].content.parts[0].text."""
+        client = GeminiClient(api_key="AIza-test")
+        result = client._parse_response(_make_gemini_response(text="Hi there!"))
+        assert result.content == "Hi there!"
+
+    def test_model_from_model_version(self) -> None:
+        """model is taken from the 'modelVersion' field."""
+        client = GeminiClient(api_key="AIza-test")
+        result = client._parse_response(_make_gemini_response(model_version="gemini-1.5-pro"))
+        assert result.model == "gemini-1.5-pro"
+
+    def test_model_fallback_to_self_model(self) -> None:
+        """model falls back to self._model when 'modelVersion' is absent."""
+        client = GeminiClient(api_key="AIza-test", model="gemini-1.5-flash")
+        data = _make_gemini_response()
+        del data["modelVersion"]
+        result = client._parse_response(data)
+        assert result.model == "gemini-1.5-flash"
+
+    def test_input_tokens_from_prompt_token_count(self) -> None:
+        """input_tokens is read from usageMetadata.promptTokenCount."""
+        client = GeminiClient(api_key="AIza-test")
+        result = client._parse_response(_make_gemini_response(prompt_tokens=42))
+        assert result.input_tokens == 42
+
+    def test_output_tokens_from_candidates_token_count(self) -> None:
+        """output_tokens is read from usageMetadata.candidatesTokenCount."""
+        client = GeminiClient(api_key="AIza-test")
+        result = client._parse_response(_make_gemini_response(candidates_tokens=17))
+        assert result.output_tokens == 17
+
+    def test_input_tokens_default_zero_when_usage_absent(self) -> None:
+        """input_tokens defaults to 0 when usageMetadata is absent."""
+        client = GeminiClient(api_key="AIza-test")
+        data = _make_gemini_response()
+        del data["usageMetadata"]
+        result = client._parse_response(data)
+        assert result.input_tokens == 0
+
+    def test_output_tokens_default_zero_when_usage_absent(self) -> None:
+        """output_tokens defaults to 0 when usageMetadata is absent."""
+        client = GeminiClient(api_key="AIza-test")
+        data = _make_gemini_response()
+        del data["usageMetadata"]
+        result = client._parse_response(data)
+        assert result.output_tokens == 0
+
+    def test_tokens_default_zero_when_fields_missing(self) -> None:
+        """Token counts default to 0 when usageMetadata fields are absent."""
+        client = GeminiClient(api_key="AIza-test")
+        result = client._parse_response(
+            {**_make_gemini_response(), "usageMetadata": {}}
+        )
+        assert result.input_tokens == 0
+        assert result.output_tokens == 0
+
+    def test_total_tokens_property(self) -> None:
+        """total_tokens equals input_tokens + output_tokens."""
+        client = GeminiClient(api_key="AIza-test")
+        result = client._parse_response(
+            _make_gemini_response(prompt_tokens=20, candidates_tokens=30)
+        )
+        assert result.total_tokens == 50

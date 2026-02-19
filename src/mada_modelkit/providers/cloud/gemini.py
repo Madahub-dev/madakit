@@ -101,5 +101,17 @@ class GeminiClient(HttpAgentClient):
         return payload
 
     def _parse_response(self, data: dict[str, Any]) -> AgentResponse:
-        """Parse the Gemini generateContent response. Implemented in task 4.3.3."""
-        raise NotImplementedError
+        """Parse a Gemini generateContent response into an AgentResponse.
+
+        Extracts ``candidates[0].content.parts[0].text`` for the response text,
+        reads ``usageMetadata.promptTokenCount`` and
+        ``usageMetadata.candidatesTokenCount`` (defaulting to 0 when absent),
+        and uses the ``modelVersion`` field with a fallback to ``self._model``.
+        """
+        usage = data.get("usageMetadata", {})
+        return AgentResponse(
+            content=data["candidates"][0]["content"]["parts"][0]["text"],
+            model=data.get("modelVersion", self._model),
+            input_tokens=usage.get("promptTokenCount", 0),
+            output_tokens=usage.get("candidatesTokenCount", 0),
+        )
