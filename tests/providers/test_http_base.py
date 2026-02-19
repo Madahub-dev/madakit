@@ -1,5 +1,5 @@
 
-"""Tests for HttpAgentClient constructor, TLS enforcement, abstract methods, and send_request pipeline (tasks 3.1.1–3.1.4).
+"""Tests for HttpAgentClient: constructor, TLS, abstract methods, send_request, health_check (tasks 3.1.1–3.1.5).
 
 Covers: base_url storage, default timeout values (connect=5.0, read=60.0),
 custom timeout configuration, headers merged into client, no headers default,
@@ -10,7 +10,8 @@ error message content, https:// acceptance when _require_tls=True,
 _build_payload/_parse_response/_endpoint declared abstract, instantiation
 blocked without all three methods, overrides callable, send_request pipeline
 (success, non-2xx ProviderError with status_code, ConnectError wrapping,
-TimeoutException wrapping).
+TimeoutException wrapping), health_check (True on any HTTP response, False on
+ConnectError/TimeoutException).
 """
 
 from __future__ import annotations
@@ -444,3 +445,56 @@ class TestSendRequest:
         client = _make_client(_error_transport(404, "not found"))
         with pytest.raises(ProviderError, match="404"):
             await client.send_request(AgentRequest(prompt="hi"))
+
+
+class TestHealthCheck:
+    """HttpAgentClient.health_check — reachability probe via GET /."""
+
+    async def test_returns_true_on_200(self) -> None:
+        """Asserts that a 200 response from GET / returns True."""
+        client = _make_client(_ok_transport({}))
+        assert await client.health_check() is True
+
+    async def test_returns_true_on_error_status(self) -> None:
+        """Asserts that a non-2xx HTTP response still returns True (server is up)."""
+        client = _make_client(_error_transport(404))
+        assert await client.health_check() is True
+
+    async def test_returns_true_on_500(self) -> None:
+        """Asserts that a 500 response still returns True (server is reachable)."""
+        client = _make_client(_error_transport(500))
+        assert await client.health_check() is True
+
+    async def test_returns_false_on_connect_error(self) -> None:
+        """Asserts that a ConnectError causes health_check to return False."""
+        client = _make_client(_connect_error_transport())
+        assert await client.health_check() is False
+
+    async def test_returns_false_on_timeout(self) -> None:
+        """Asserts that a TimeoutException causes health_check to return False."""
+        client = _make_client(_timeout_transport())
+        assert await client.health_check() is False
+
+    async def test_does_not_raise_on_connect_error(self) -> None:
+        """Asserts that health_check never propagates ConnectError."""
+        client = _make_client(_connect_error_transport())
+        result = await client.health_check()  # must not raise
+        assert result is False
+
+    async def test_does_not_raise_on_timeout(self) -> None:
+        """Asserts that health_check never propagates TimeoutException."""
+        client = _make_client(_timeout_transport())
+        result = await client.health_check()  # must not raise
+        assert result is False
+
+    async def test_issues_get_request(self) -> None:
+        """Asserts that health_check uses the GET method."""
+        captured_methods: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_methods.append(request.method)
+            return httpx.Response(200)
+
+        client = _make_client(httpx.MockTransport(handler))
+        await client.health_check()
+        assert captured_methods == ["GET"]

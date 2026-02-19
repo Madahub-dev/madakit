@@ -95,8 +95,17 @@ class HttpAgentClient(BaseAgentClient):
         return self._parse_response(response.json())
 
     async def health_check(self) -> bool:
-        """Check provider availability (stub; implemented in task 3.1.5)."""
-        return True
+        """Return True if the provider is reachable, False otherwise.
+
+        Issues a ``GET /`` against the base URL and returns ``True`` for any
+        response (including error status codes — the server is at least up).
+        Returns ``False`` on ``ConnectError`` or ``TimeoutException``.
+        """
+        try:
+            await self._http_client.get("/")
+            return True
+        except (httpx.ConnectError, httpx.TimeoutException):
+            return False
 
     async def close(self) -> None:
         """Close the underlying httpx client (stub; implemented in task 3.1.6)."""
