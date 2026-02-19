@@ -406,6 +406,53 @@ class TestCancel:
         await client.cancel()
 
 
+# ---------------------------------------------------------------------------
+# TestClose
+# ---------------------------------------------------------------------------
+
+
+class TestClose:
+    """LlamaCppClient.close (task 6.1.6)."""
+
+    @pytest.mark.asyncio
+    async def test_close_sets_llm_to_none(self) -> None:
+        """close() sets _llm to None, releasing the model reference."""
+        client = _loaded_client()
+        assert client._llm is not None
+        await client.close()
+        assert client._llm is None
+
+    @pytest.mark.asyncio
+    async def test_close_shuts_down_executor(self) -> None:
+        """close() calls executor.shutdown(wait=False)."""
+        client = _loaded_client()
+        with patch.object(client._executor, "shutdown") as mock_shutdown:
+            await client.close()
+        mock_shutdown.assert_called_once_with(wait=False)
+
+    @pytest.mark.asyncio
+    async def test_close_is_noop_when_llm_already_none(self) -> None:
+        """close() does not raise when _llm is already None."""
+        client = LlamaCppClient(model_path="model.gguf")
+        assert client._llm is None
+        await client.close()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_close_callable_multiple_times(self) -> None:
+        """close() can be called multiple times without error."""
+        client = _loaded_client()
+        await client.close()
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_context_manager_calls_close(self) -> None:
+        """__aexit__ invokes close(), setting _llm to None."""
+        with patch.object(LlamaCppClient, "_load_model", return_value=MagicMock()):
+            async with LlamaCppClient(model_path="model.gguf") as client:
+                assert client._llm is not None
+            assert client._llm is None
+
+
 class TestSendRequest:
     """LlamaCppClient.send_request (task 6.1.3)."""
 
