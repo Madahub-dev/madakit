@@ -8,6 +8,7 @@ systemInstruction top-level field, generationConfig with maxOutputTokens and
 stopSequences, inlineData attachment blocks.
 _parse_response (task 4.3.3) — candidates[0].content.parts[0].text extraction,
 modelVersion with _model fallback, promptTokenCount/candidatesTokenCount defaults.
+__repr__ (task 4.3.4) — API key redacted, model visible, exact format.
 """
 
 from __future__ import annotations
@@ -46,6 +47,51 @@ class _HttpGemini(HttpAgentClient):
     def _endpoint(self) -> str:
         """Stub implementation."""
         return "/test"
+
+
+# ---------------------------------------------------------------------------
+# TestRepr
+# ---------------------------------------------------------------------------
+
+
+class TestRepr:
+    """GeminiClient.__repr__ (task 4.3.4)."""
+
+    def test_repr_does_not_contain_api_key(self) -> None:
+        """repr output does not expose the raw API key."""
+        client = GeminiClient(api_key="AIza-secret")
+        assert "AIza-secret" not in repr(client)
+
+    def test_repr_contains_redacted_placeholder(self) -> None:
+        """repr contains '***' in place of the API key."""
+        client = GeminiClient(api_key="AIza-secret")
+        assert "***" in repr(client)
+
+    def test_repr_contains_model(self) -> None:
+        """repr contains the model identifier."""
+        client = GeminiClient(api_key="AIza-test", model="gemini-1.5-pro")
+        assert "gemini-1.5-pro" in repr(client)
+
+    def test_repr_exact_format_default_model(self) -> None:
+        """repr matches the expected format with the default model."""
+        client = GeminiClient(api_key="AIza-test")
+        assert repr(client) == "GeminiClient(model='gemini-2.0-flash', api_key=***)"
+
+    def test_repr_exact_format_custom_model(self) -> None:
+        """repr reflects a custom model in the exact format."""
+        client = GeminiClient(api_key="AIza-test", model="gemini-1.5-pro")
+        assert repr(client) == "GeminiClient(model='gemini-1.5-pro', api_key=***)"
+
+    def test_repr_different_keys_same_output(self) -> None:
+        """Two clients with different keys produce identical repr output."""
+        a = GeminiClient(api_key="key-one")
+        b = GeminiClient(api_key="key-two")
+        assert repr(a) == repr(b)
+
+    def test_repr_is_string(self) -> None:
+        """repr returns a str."""
+        client = GeminiClient(api_key="AIza-test")
+        assert isinstance(repr(client), str)
 
 
 # ---------------------------------------------------------------------------
