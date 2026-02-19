@@ -1,4 +1,5 @@
-"""Tests for HttpAgentClient constructor, TLS enforcement, and abstract methods (tasks 3.1.1–3.1.3).
+
+"""Tests for HttpAgentClient constructor, TLS enforcement, abstract methods, and send_request pipeline (tasks 3.1.1–3.1.4).
 
 Covers: base_url storage, default timeout values (connect=5.0, read=60.0),
 custom timeout configuration, headers merged into client, no headers default,
@@ -7,17 +8,22 @@ BaseAgentClient inheritance, httpx.AsyncClient creation, per-instance
 client independence, ValueError raised for http:// when _require_tls=True,
 error message content, https:// acceptance when _require_tls=True,
 _build_payload/_parse_response/_endpoint declared abstract, instantiation
-blocked without all three methods, and overrides callable.
+blocked without all three methods, overrides callable, send_request pipeline
+(success, non-2xx ProviderError with status_code, ConnectError wrapping,
+TimeoutException wrapping).
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
 import pytest
 
+
 from mada_modelkit._base import BaseAgentClient
+from mada_modelkit._errors import ProviderError
 from mada_modelkit._types import AgentRequest, AgentResponse
 from mada_modelkit.providers._http_base import HttpAgentClient
 
@@ -41,10 +47,6 @@ class _ConcreteHttpClient(HttpAgentClient):
     def _endpoint(self) -> str:
         """Return a fixed endpoint for tests."""
         return "/test"
-
-    async def send_request(self, request: AgentRequest) -> AgentResponse:
-        """Satisfy the inherited abstract contract; not called during unit tests."""
-        raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
@@ -299,3 +301,146 @@ class TestTlsEnforcement:
         except ValueError:
             pass
         assert not hasattr(instance, "_http_client")
+
+
+# ---------------------------------------------------------------------------
+# Helpers for send_request tests — MockTransport-backed clients
+# ---------------------------------------------------------------------------
+
+
+def _make_client(
+    transport: httpx.MockTransport,
+    base_url: str = "https://api.example.com",
+) -> _ConcreteHttpClient:
+    """Return a _ConcreteHttpClient whose httpx client uses a MockTransport."""
+    client = _ConcreteHttpClient(base_url=base_url)
+    client._http_client = httpx.AsyncClient(
+        base_url=base_url,
+        transport=transport,
+    )
+    return client
+
+
+def _ok_transport(body: dict[str, Any]) -> httpx.MockTransport:
+    """Return a MockTransport that always responds 200 with *body* as JSON."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=json.dumps(body).encode())
+
+    return httpx.MockTransport(handler)
+
+
+def _error_transport(status_code: int, text: str = "error") -> httpx.MockTransport:
+    """Return a MockTransport that always responds with *status_code*."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, text=text)
+
+    return httpx.MockTransport(handler)
+
+
+def _connect_error_transport() -> httpx.MockTransport:
+    """Return a MockTransport that always raises httpx.ConnectError."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    return httpx.MockTransport(handler)
+
+
+def _timeout_transport() -> httpx.MockTransport:
+    """Return a MockTransport that always raises httpx.ReadTimeout."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    return httpx.MockTransport(handler)
+
+
+class TestSendRequest:
+    """HttpAgentClient.send_request — pipeline, error wrapping, and status codes."""
+
+    async def test_success_returns_agent_response(self) -> None:
+        """Asserts that a 200 response produces an AgentResponse."""
+        client = _make_client(_ok_transport({"key": "value"}))
+        result = await client.send_request(AgentRequest(prompt="hi"))
+        assert isinstance(result, AgentResponse)
+
+    async def test_success_passes_payload_to_build_payload(self) -> None:
+        """Asserts that the prompt from AgentRequest appears in the POST body."""
+        captured: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request.content)
+            return httpx.Response(200, content=json.dumps({}).encode())
+
+        client = _make_client(httpx.MockTransport(handler))
+        await client.send_request(AgentRequest(prompt="hello"))
+        body = json.loads(captured[0])
+        assert body.get("prompt") == "hello"
+
+    async def test_success_uses_endpoint_path(self) -> None:
+        """Asserts that the request is sent to the path returned by _endpoint()."""
+        captured_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_paths.append(request.url.path)
+            return httpx.Response(200, content=json.dumps({}).encode())
+
+        client = _make_client(httpx.MockTransport(handler))
+        await client.send_request(AgentRequest(prompt="hi"))
+        assert captured_paths[0].endswith("/test")
+
+    async def test_non_2xx_raises_provider_error(self) -> None:
+        """Asserts that a non-2xx HTTP response raises ProviderError."""
+        client = _make_client(_error_transport(400, "bad request"))
+        with pytest.raises(ProviderError):
+            await client.send_request(AgentRequest(prompt="hi"))
+
+    async def test_non_2xx_provider_error_has_status_code(self) -> None:
+        """Asserts that the ProviderError carries the HTTP status code."""
+        client = _make_client(_error_transport(422, "unprocessable"))
+        with pytest.raises(ProviderError) as exc_info:
+            await client.send_request(AgentRequest(prompt="hi"))
+        assert exc_info.value.status_code == 422
+
+    async def test_500_raises_provider_error_with_status_code(self) -> None:
+        """Asserts that a 500 response raises ProviderError with status_code=500."""
+        client = _make_client(_error_transport(500, "internal server error"))
+        with pytest.raises(ProviderError) as exc_info:
+            await client.send_request(AgentRequest(prompt="hi"))
+        assert exc_info.value.status_code == 500
+
+    async def test_connect_error_raises_provider_error(self) -> None:
+        """Asserts that httpx.ConnectError is wrapped in ProviderError."""
+        client = _make_client(_connect_error_transport())
+        with pytest.raises(ProviderError):
+            await client.send_request(AgentRequest(prompt="hi"))
+
+    async def test_connect_error_chained_as_cause(self) -> None:
+        """Asserts that the original ConnectError is chained via __cause__."""
+        client = _make_client(_connect_error_transport())
+        with pytest.raises(ProviderError) as exc_info:
+            await client.send_request(AgentRequest(prompt="hi"))
+        assert isinstance(exc_info.value.__cause__, httpx.ConnectError)
+
+    async def test_timeout_raises_provider_error(self) -> None:
+        """Asserts that httpx.TimeoutException is wrapped in ProviderError."""
+        client = _make_client(_timeout_transport())
+        with pytest.raises(ProviderError):
+            await client.send_request(AgentRequest(prompt="hi"))
+
+    async def test_timeout_chained_as_cause(self) -> None:
+        """Asserts that the original TimeoutException is chained via __cause__."""
+        client = _make_client(_timeout_transport())
+        with pytest.raises(ProviderError) as exc_info:
+            await client.send_request(AgentRequest(prompt="hi"))
+        assert isinstance(exc_info.value.__cause__, httpx.TimeoutException)
+
+    async def test_provider_error_not_raised_on_success(self) -> None:
+        """Asserts that a 200 response does not raise any exception."""
+        client = _make_client(_ok_transport({"result": "ok"}))
+        result = await client.send_request(AgentRequest(prompt="hi"))
+        assert result is not None
+
+    async def test_error_message_contains_status_code(self) -> None:
+        """Asserts that the ProviderError message includes the HTTP status code."""
+        client = _make_client(_error_transport(404, "not found"))
+        with pytest.raises(ProviderError, match="404"):
+            await client.send_request(AgentRequest(prompt="hi"))

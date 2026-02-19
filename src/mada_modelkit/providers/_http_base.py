@@ -73,8 +73,26 @@ class HttpAgentClient(BaseAgentClient):
         """Return the endpoint path relative to base_url (e.g. '/chat/completions')."""
 
     async def send_request(self, request: AgentRequest) -> AgentResponse:
-        """POST to the provider endpoint (stub; full pipeline added in task 3.1.4)."""
-        raise NotImplementedError
+        """POST to the provider endpoint and return a parsed AgentResponse.
+
+        Pipeline: ``_build_payload`` → ``POST _endpoint()`` → status check →
+        ``_parse_response``.  ``httpx.ConnectError`` and
+        ``httpx.TimeoutException`` are re-raised as ``ProviderError``.
+        Non-2xx responses raise ``ProviderError`` with the HTTP status code.
+        """
+        payload = self._build_payload(request)
+        try:
+            response = await self._http_client.post(self._endpoint(), json=payload)
+        except httpx.TimeoutException as exc:
+            raise ProviderError(f"Request timed out: {exc}") from exc
+        except httpx.ConnectError as exc:
+            raise ProviderError(f"Connection failed: {exc}") from exc
+        if response.is_error:
+            raise ProviderError(
+                f"HTTP {response.status_code}: {response.text}",
+                status_code=response.status_code,
+            )
+        return self._parse_response(response.json())
 
     async def health_check(self) -> bool:
         """Check provider availability (stub; implemented in task 3.1.5)."""
