@@ -7,6 +7,8 @@ semaphore support, BaseAgentClient inheritance, __repr__ format, and module
 exports.
 __aenter__ model + tokenizer loading (task 6.2.2) — loads both via executor;
 returns self; deferred import; both None before aenter.
+send_request (task 6.2.3) — lazy load fallback; executor dispatch;
+AgentResponse returned; ProviderError wrapping.
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mada_modelkit._base import BaseAgentClient
+from mada_modelkit._errors import ProviderError
+from mada_modelkit._types import AgentRequest, AgentResponse
 from mada_modelkit.providers.native.transformers import TransformersClient
 
 
@@ -258,4 +262,106 @@ class TestAenter:
 
         with patch.object(client, "_load_model", side_effect=load_and_record):
             await client.__aenter__()
+        assert call_thread_ids[0] != threading.main_thread().ident
+
+
+# ---------------------------------------------------------------------------
+# Helpers for send_request tests
+# ---------------------------------------------------------------------------
+
+
+def _loaded_client() -> TransformersClient:
+    """Return a TransformersClient with _model and _tokenizer pre-set to MagicMocks."""
+    client = TransformersClient(model_name="gpt2")
+    client._model = MagicMock()
+    client._tokenizer = MagicMock()
+    return client
+
+
+def _fake_response() -> AgentResponse:
+    """Return a minimal AgentResponse for use as a mock return value."""
+    return AgentResponse(
+        content="generated text", model="gpt2", input_tokens=4, output_tokens=6
+    )
+
+
+# ---------------------------------------------------------------------------
+# TestSendRequest
+# ---------------------------------------------------------------------------
+
+
+class TestSendRequest:
+    """TransformersClient.send_request (task 6.2.3)."""
+
+    @pytest.mark.asyncio
+    async def test_send_request_returns_agent_response(self) -> None:
+        """send_request returns an AgentResponse."""
+        client = _loaded_client()
+        with patch.object(client, "_sync_generate", return_value=_fake_response()):
+            result = await client.send_request(AgentRequest(prompt="Hi"))
+        assert isinstance(result, AgentResponse)
+
+    @pytest.mark.asyncio
+    async def test_send_request_content_from_sync_generate(self) -> None:
+        """AgentResponse.content matches what _sync_generate returned."""
+        client = _loaded_client()
+        with patch.object(client, "_sync_generate", return_value=_fake_response()):
+            result = await client.send_request(AgentRequest(prompt="Hi"))
+        assert result.content == "generated text"
+
+    @pytest.mark.asyncio
+    async def test_send_request_calls_sync_generate_once(self) -> None:
+        """send_request calls _sync_generate exactly once with the request."""
+        client = _loaded_client()
+        mock_gen = MagicMock(return_value=_fake_response())
+        with patch.object(client, "_sync_generate", mock_gen):
+            request = AgentRequest(prompt="Test")
+            await client.send_request(request)
+        mock_gen.assert_called_once_with(request)
+
+    @pytest.mark.asyncio
+    async def test_send_request_lazy_loads_when_model_is_none(self) -> None:
+        """send_request calls __aenter__ to load the model when _model is None."""
+        client = TransformersClient(model_name="gpt2")
+        assert client._model is None
+        with patch.object(
+            client, "_load_model", return_value=(MagicMock(), MagicMock())
+        ):
+            with patch.object(client, "_sync_generate", return_value=_fake_response()):
+                await client.send_request(AgentRequest(prompt="Hi"))
+        assert client._model is not None
+
+    @pytest.mark.asyncio
+    async def test_send_request_does_not_reload_when_model_set(self) -> None:
+        """send_request does not call _load_model when _model is already loaded."""
+        client = _loaded_client()
+        mock_load = MagicMock(return_value=(MagicMock(), MagicMock()))
+        with patch.object(client, "_load_model", mock_load):
+            with patch.object(client, "_sync_generate", return_value=_fake_response()):
+                await client.send_request(AgentRequest(prompt="Hi"))
+        mock_load.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_request_wraps_exception_as_provider_error(self) -> None:
+        """Exceptions from _sync_generate are wrapped as ProviderError."""
+        client = _loaded_client()
+        with patch.object(
+            client, "_sync_generate", side_effect=RuntimeError("CUDA OOM")
+        ):
+            with pytest.raises(ProviderError, match="CUDA OOM"):
+                await client.send_request(AgentRequest(prompt="Hi"))
+
+    @pytest.mark.asyncio
+    async def test_send_request_dispatches_to_executor(self) -> None:
+        """_sync_generate is run in a worker thread via the executor."""
+        client = _loaded_client()
+        call_thread_ids: list[int] = []
+
+        def recording_gen(request: AgentRequest) -> AgentResponse:
+            """Record thread id and return a fake response."""
+            call_thread_ids.append(threading.current_thread().ident or 0)
+            return _fake_response()
+
+        with patch.object(client, "_sync_generate", side_effect=recording_gen):
+            await client.send_request(AgentRequest(prompt="Hi"))
         assert call_thread_ids[0] != threading.main_thread().ident
