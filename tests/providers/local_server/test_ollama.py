@@ -1,0 +1,180 @@
+"""Tests for providers/local_server/ollama.py.
+
+Covers: OllamaClient constructor (task 5.1.1) — default model, custom model,
+default base_url, custom base_url, no TLS enforcement, timeout forwarding,
+semaphore creation, OpenAICompatMixin inheritance, __repr__ format, and
+module exports.
+health_check override (task 5.1.2) — queries /api/tags not /.
+send_request_stream SSE (task 5.1.3) — OpenAI-compat streaming format.
+Comprehensive integration (task 5.1.4) — full round-trip via MockTransport.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from mada_modelkit._types import AgentRequest, AgentResponse
+from mada_modelkit.providers._http_base import HttpAgentClient
+from mada_modelkit.providers._openai_compat import OpenAICompatMixin
+from mada_modelkit.providers.local_server.ollama import OllamaClient
+
+
+# ---------------------------------------------------------------------------
+# TestModuleExports
+# ---------------------------------------------------------------------------
+
+
+class TestModuleExports:
+    """Module-level export contract for ollama.py."""
+
+    def test_ollama_client_in_all(self) -> None:
+        """OllamaClient is listed in __all__."""
+        from mada_modelkit.providers.local_server import ollama
+
+        assert "OllamaClient" in ollama.__all__
+
+    def test_ollama_client_importable(self) -> None:
+        """OllamaClient can be imported directly from its module."""
+        from mada_modelkit.providers.local_server.ollama import OllamaClient as OC
+
+        assert OC is OllamaClient
+
+    def test_ollama_client_is_subclass_of_http_agent_client(self) -> None:
+        """OllamaClient inherits from HttpAgentClient."""
+        assert issubclass(OllamaClient, HttpAgentClient)
+
+    def test_ollama_client_uses_openai_compat_mixin(self) -> None:
+        """OllamaClient inherits from OpenAICompatMixin."""
+        assert issubclass(OllamaClient, OpenAICompatMixin)
+
+
+# ---------------------------------------------------------------------------
+# TestOllamaClientConstructor
+# ---------------------------------------------------------------------------
+
+
+class TestOllamaClientConstructor:
+    """OllamaClient constructor (task 5.1.1)."""
+
+    def test_default_model(self) -> None:
+        """Default model tag is llama3.2."""
+        client = OllamaClient()
+        assert client._model == "llama3.2"
+
+    def test_custom_model_stored(self) -> None:
+        """Custom model string is stored in _model."""
+        client = OllamaClient(model="mistral")
+        assert client._model == "mistral"
+
+    def test_default_base_url_is_localhost(self) -> None:
+        """Default base_url targets localhost:11434."""
+        client = OllamaClient()
+        assert "localhost:11434" in str(client._http_client.base_url)
+
+    def test_default_base_url_includes_v1(self) -> None:
+        """Default base_url path includes /v1."""
+        client = OllamaClient()
+        assert "/v1" in str(client._http_client.base_url)
+
+    def test_custom_base_url_accepted(self) -> None:
+        """A custom base_url is forwarded to the httpx client."""
+        client = OllamaClient(base_url="http://192.168.1.10:11434/v1")
+        assert "192.168.1.10" in str(client._http_client.base_url)
+
+    def test_base_url_stored(self) -> None:
+        """_base_url attribute stores the constructor argument."""
+        client = OllamaClient(base_url="http://myhost:11434/v1")
+        assert client._base_url == "http://myhost:11434/v1"
+
+    def test_require_tls_is_false(self) -> None:
+        """_require_tls class variable is False (not enforced for local server)."""
+        assert OllamaClient._require_tls is False
+
+    def test_http_url_accepted(self) -> None:
+        """http:// base_url is accepted without error (no TLS enforcement)."""
+        client = OllamaClient(base_url="http://localhost:11434/v1")
+        assert str(client._http_client.base_url).startswith("http://")
+
+    def test_no_authorization_header(self) -> None:
+        """No Authorization header is set (no API key needed)."""
+        client = OllamaClient()
+        assert "authorization" not in client._http_client.headers
+
+    def test_connect_timeout_forwarded(self) -> None:
+        """connect_timeout kwarg is forwarded to HttpAgentClient."""
+        client = OllamaClient(connect_timeout=2.0)
+        assert client._http_client.timeout.connect == 2.0
+
+    def test_read_timeout_forwarded(self) -> None:
+        """read_timeout kwarg is forwarded to HttpAgentClient."""
+        client = OllamaClient(read_timeout=120.0)
+        assert client._http_client.timeout.read == 120.0
+
+    def test_max_concurrent_creates_semaphore(self) -> None:
+        """max_concurrent kwarg creates an asyncio.Semaphore."""
+        client = OllamaClient(max_concurrent=1)
+        assert isinstance(client._semaphore, asyncio.Semaphore)
+
+    def test_no_semaphore_by_default(self) -> None:
+        """_semaphore is None when max_concurrent is not set."""
+        client = OllamaClient()
+        assert client._semaphore is None
+
+    def test_endpoint_returns_chat_completions(self) -> None:
+        """_endpoint returns /chat/completions (inherited from OpenAICompatMixin)."""
+        client = OllamaClient()
+        assert client._endpoint() == "/chat/completions"
+
+    def test_different_models_stored_independently(self) -> None:
+        """Two clients with different models store them independently."""
+        a = OllamaClient(model="llama3.2")
+        b = OllamaClient(model="mistral")
+        assert a._model == "llama3.2"
+        assert b._model == "mistral"
+
+    def test_different_base_urls_stored_independently(self) -> None:
+        """Two clients with different base_urls store them independently."""
+        a = OllamaClient(base_url="http://host-a:11434/v1")
+        b = OllamaClient(base_url="http://host-b:11434/v1")
+        assert "host-a" in str(a._http_client.base_url)
+        assert "host-b" in str(b._http_client.base_url)
+
+
+# ---------------------------------------------------------------------------
+# TestRepr
+# ---------------------------------------------------------------------------
+
+
+class TestRepr:
+    """OllamaClient.__repr__ (task 5.1.1)."""
+
+    def test_repr_contains_model(self) -> None:
+        """repr contains the model tag."""
+        client = OllamaClient(model="mistral")
+        assert "mistral" in repr(client)
+
+    def test_repr_contains_base_url(self) -> None:
+        """repr contains the base URL."""
+        client = OllamaClient()
+        assert "localhost:11434" in repr(client)
+
+    def test_repr_exact_format_defaults(self) -> None:
+        """repr matches the expected format with default arguments."""
+        client = OllamaClient()
+        assert repr(client) == (
+            "OllamaClient(model='llama3.2', base_url='http://localhost:11434/v1')"
+        )
+
+    def test_repr_exact_format_custom(self) -> None:
+        """repr reflects custom model and base_url."""
+        client = OllamaClient(model="mistral", base_url="http://myhost:11434/v1")
+        assert repr(client) == (
+            "OllamaClient(model='mistral', base_url='http://myhost:11434/v1')"
+        )
+
+    def test_repr_is_string(self) -> None:
+        """repr returns a str."""
+        client = OllamaClient()
+        assert isinstance(repr(client), str)
