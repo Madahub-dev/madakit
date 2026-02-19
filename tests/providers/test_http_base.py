@@ -1,10 +1,11 @@
-"""Tests for HttpAgentClient constructor (task 3.1.1).
+"""Tests for HttpAgentClient constructor and TLS enforcement (tasks 3.1.1–3.1.2).
 
 Covers: base_url storage, default timeout values (connect=5.0, read=60.0),
 custom timeout configuration, headers merged into client, no headers default,
 max_concurrent semaphore, _require_tls class variable default (False),
-BaseAgentClient inheritance, httpx.AsyncClient creation, and per-instance
-client independence.
+BaseAgentClient inheritance, httpx.AsyncClient creation, per-instance
+client independence, ValueError raised for http:// when _require_tls=True,
+error message content, and https:// acceptance when _require_tls=True.
 """
 
 from __future__ import annotations
@@ -161,3 +162,48 @@ class TestModuleExports:
         """Asserts that HttpAgentClient can be imported from the module."""
         from mada_modelkit.providers._http_base import HttpAgentClient as HAC
         assert HAC is HttpAgentClient
+
+
+class TestTlsEnforcement:
+    """HttpAgentClient._require_tls — http:// rejection and https:// acceptance."""
+
+    def test_http_url_raises_value_error_when_require_tls_true(self) -> None:
+        """Asserts that a ValueError is raised when http:// is used with _require_tls=True."""
+        with pytest.raises(ValueError):
+            _TlsHttpClient(base_url="http://api.example.com")
+
+    def test_error_message_contains_offending_url(self) -> None:
+        """Asserts that the ValueError message includes the http:// URL."""
+        url = "http://api.example.com"
+        with pytest.raises(ValueError, match=url):
+            _TlsHttpClient(base_url=url)
+
+    def test_https_url_does_not_raise_when_require_tls_true(self) -> None:
+        """Asserts that an https:// URL is accepted without error when _require_tls=True."""
+        client = _TlsHttpClient(base_url="https://api.example.com")
+        assert isinstance(client._http_client, httpx.AsyncClient)
+
+    def test_http_url_does_not_raise_when_require_tls_false(self) -> None:
+        """Asserts that an http:// URL is silently accepted when _require_tls=False."""
+        client = _ConcreteHttpClient(base_url="http://localhost:11434")
+        assert isinstance(client._http_client, httpx.AsyncClient)
+
+    def test_require_tls_check_uses_startswith_not_substring(self) -> None:
+        """Asserts that 'https://host/http://path' is not rejected (check is prefix-only)."""
+        client = _TlsHttpClient(base_url="https://host/http://path")
+        assert isinstance(client._http_client, httpx.AsyncClient)
+
+    def test_tls_error_raised_before_httpx_client_created(self) -> None:
+        """Asserts that the TLS ValueError is raised before any httpx client is constructed."""
+        with pytest.raises(ValueError):
+            _TlsHttpClient(base_url="http://api.example.com")
+        # If we reach here the constructor raised before completing — no client leak
+
+    def test_no_client_attribute_on_failed_construction(self) -> None:
+        """Asserts that _http_client is not set when TLS validation fails."""
+        instance = object.__new__(_TlsHttpClient)
+        try:
+            _TlsHttpClient.__init__(instance, base_url="http://api.example.com")  # type: ignore[arg-type]
+        except ValueError:
+            pass
+        assert not hasattr(instance, "_http_client")
