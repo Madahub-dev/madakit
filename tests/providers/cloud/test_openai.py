@@ -1,4 +1,4 @@
-"""Tests for OpenAIClient constructor, __repr__, and send_request_stream (tasks 4.1.1–4.1.3).
+"""Tests for OpenAIClient: constructor, __repr__, send_request_stream, and integration (tasks 4.1.1–4.1.4).
 
 Covers: OpenAICompatMixin and HttpAgentClient inheritance, default model
 "gpt-4o-mini", custom model stored as _model, api_key stored as _api_key,
@@ -10,7 +10,9 @@ format "OpenAIClient(model=..., api_key=***)", key not present, model
 present, is a str; send_request_stream: SSE delta chunks yielded, final
 StreamChunk on [DONE], stream=True in payload, non-2xx raises ProviderError,
 ConnectError/TimeoutException wrapped as ProviderError, empty delta chunks
-not suppressed, non-data lines skipped.
+not suppressed, non-data lines skipped; integration: send_request round-trip,
+auth header forwarded in both paths, /chat/completions route, health_check,
+close/context manager.
 """
 
 from __future__ import annotations
@@ -212,12 +214,13 @@ def _sse_body(*deltas: str, include_done: bool = True) -> bytes:
     return "".join(lines).encode()
 
 
-def _make_streaming_client(handler: object) -> OpenAIClient:
+def _make_streaming_client(handler: object, api_key: str = "sk-test") -> OpenAIClient:
     """Return an OpenAIClient whose httpx client uses a MockTransport."""
-    client = OpenAIClient(api_key="sk-test")
+    client = OpenAIClient(api_key=api_key)
     client._http_client = httpx.AsyncClient(
         base_url="https://api.openai.com/v1",
         transport=httpx.MockTransport(handler),  # type: ignore[arg-type]
+        headers={"Authorization": f"Bearer {api_key}"},
     )
     return client
 
@@ -353,3 +356,135 @@ class TestSendRequestStream:
         chunks = [c async for c in client.send_request_stream(AgentRequest(prompt="hi"))]
         content = [c.delta for c in chunks if not c.is_final]
         assert content == ["A", "B", "C"]
+
+
+# ---------------------------------------------------------------------------
+# Helper for integration tests — JSON response body in OpenAI non-stream format
+# ---------------------------------------------------------------------------
+
+
+def _json_response(content: str = "Hello!", model: str = "gpt-4o-mini") -> bytes:
+    """Return a JSON-encoded non-streaming OpenAI chat-completions response."""
+    body = {
+        "choices": [{"message": {"content": content}}],
+        "model": model,
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    return json.dumps(body).encode()
+
+
+def _make_client(handler: object, api_key: str = "sk-test") -> OpenAIClient:
+    """Return an OpenAIClient wired to a MockTransport for non-streaming requests."""
+    client = OpenAIClient(api_key=api_key)
+    client._http_client = httpx.AsyncClient(
+        base_url="https://api.openai.com/v1",
+        transport=httpx.MockTransport(handler),  # type: ignore[arg-type]
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    return client
+
+
+class TestIntegration:
+    """OpenAIClient — end-to-end integration across send_request, stream, and lifecycle."""
+
+    async def test_send_request_returns_agent_response(self) -> None:
+        """Asserts that send_request returns an AgentResponse with correct content."""
+        from mada_modelkit._types import AgentResponse
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_json_response("The answer is 42."))
+
+        client = _make_client(handler)
+        result = await client.send_request(AgentRequest(prompt="What is 6×7?"))
+        assert isinstance(result, AgentResponse)
+        assert result.content == "The answer is 42."
+
+    async def test_send_request_posts_to_chat_completions(self) -> None:
+        """Asserts that send_request routes to /v1/chat/completions."""
+        captured_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_paths.append(request.url.path)
+            return httpx.Response(200, content=_json_response())
+
+        client = _make_client(handler)
+        await client.send_request(AgentRequest(prompt="hi"))
+        assert captured_paths[0].endswith("/chat/completions")
+
+    async def test_send_request_forwards_authorization_header(self) -> None:
+        """Asserts that the Authorization Bearer header is sent with send_request."""
+        captured_auth: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_auth.append(request.headers.get("authorization", ""))
+            return httpx.Response(200, content=_json_response())
+
+        client = _make_client(handler)
+        await client.send_request(AgentRequest(prompt="hi"))
+        assert captured_auth[0] == "Bearer sk-test"
+
+    async def test_send_request_stream_forwards_authorization_header(self) -> None:
+        """Asserts that the Authorization Bearer header is sent with send_request_stream."""
+        captured_auth: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_auth.append(request.headers.get("authorization", ""))
+            return httpx.Response(200, content=_sse_body("ok"))
+
+        client = _make_streaming_client(handler)
+        async for _ in client.send_request_stream(AgentRequest(prompt="hi")):
+            pass
+        assert captured_auth[0] == "Bearer sk-test"
+
+    async def test_send_request_stream_routes_to_chat_completions(self) -> None:
+        """Asserts that send_request_stream also routes to /v1/chat/completions."""
+        captured_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_paths.append(request.url.path)
+            return httpx.Response(200, content=_sse_body("ok"))
+
+        client = _make_streaming_client(handler)
+        async for _ in client.send_request_stream(AgentRequest(prompt="hi")):
+            pass
+        assert captured_paths[0].endswith("/chat/completions")
+
+    async def test_health_check_returns_true_on_200(self) -> None:
+        """Asserts that health_check returns True when the server responds."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200)
+
+        client = _make_client(handler)
+        assert await client.health_check() is True
+
+    async def test_health_check_returns_false_on_connect_error(self) -> None:
+        """Asserts that health_check returns False on ConnectError."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("refused")
+
+        client = _make_client(handler)
+        assert await client.health_check() is False
+
+    async def test_context_manager_closes_http_client(self) -> None:
+        """Asserts that the async context manager closes the httpx client on exit."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_json_response())
+
+        async with _make_client(handler) as client:
+            await client.send_request(AgentRequest(prompt="hi"))
+        assert client._http_client.is_closed
+
+    async def test_token_counts_flow_to_agent_response(self) -> None:
+        """Asserts that prompt_tokens and completion_tokens reach the AgentResponse."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = {
+                "choices": [{"message": {"content": "answer"}}],
+                "model": "gpt-4o-mini",
+                "usage": {"prompt_tokens": 25, "completion_tokens": 12},
+            }
+            return httpx.Response(200, content=json.dumps(body).encode())
+
+        client = _make_client(handler)
+        result = await client.send_request(AgentRequest(prompt="hi"))
+        assert result.input_tokens == 25
+        assert result.output_tokens == 12
