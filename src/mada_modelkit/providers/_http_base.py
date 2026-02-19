@@ -7,6 +7,9 @@ all cloud and local-server providers. Requires the optional ``httpx`` extra.
 
 from __future__ import annotations
 
+from abc import abstractmethod
+from typing import Any
+
 import httpx
 
 from mada_modelkit._base import BaseAgentClient
@@ -57,17 +60,17 @@ class HttpAgentClient(BaseAgentClient):
             headers=headers or {},
         )
 
-    def _build_payload(self, request: AgentRequest) -> dict[str, object]:
-        """Build the provider-specific JSON request body (stub; implemented in task 3.1.3)."""
-        raise NotImplementedError
+    @abstractmethod
+    def _build_payload(self, request: AgentRequest) -> dict[str, Any]:
+        """Build the provider-specific JSON request body from an AgentRequest."""
 
-    def _parse_response(self, data: dict[str, object]) -> AgentResponse:
-        """Parse a successful JSON response into AgentResponse (stub; implemented in task 3.1.3)."""
-        raise NotImplementedError
+    @abstractmethod
+    def _parse_response(self, data: dict[str, Any]) -> AgentResponse:
+        """Parse a successful JSON response dict into an AgentResponse."""
 
+    @abstractmethod
     def _endpoint(self) -> str:
-        """Return the request path relative to base_url (stub; implemented in task 3.1.3)."""
-        raise NotImplementedError
+        """Return the endpoint path relative to base_url (e.g. '/chat/completions')."""
 
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """POST to the provider endpoint (stub; full pipeline added in task 3.1.4)."""
