@@ -360,6 +360,52 @@ class TestSyncGenerate:
         assert client._llm.call_args[1]["stop"] == []
 
 
+# ---------------------------------------------------------------------------
+# TestCancel
+# ---------------------------------------------------------------------------
+
+
+class TestCancel:
+    """LlamaCppClient.cancel (task 6.1.5)."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_is_noop_when_llm_is_none(self) -> None:
+        """cancel() does not raise when _llm is None (model not loaded)."""
+        client = LlamaCppClient(model_path="model.gguf")
+        assert client._llm is None
+        await client.cancel()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_cancel_is_noop_when_llm_has_no_abort(self) -> None:
+        """cancel() does not raise when _llm lacks an abort attribute."""
+        client = _loaded_client()
+        client._llm = MagicMock(spec=[])  # no attributes at all
+        await client.cancel()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_cancel_calls_abort_when_available(self) -> None:
+        """cancel() calls _llm.abort() when _llm has an abort method."""
+        client = _loaded_client()
+        client._llm = MagicMock()  # MagicMock has all attributes by default
+        await client.cancel()
+        client._llm.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancel_does_not_call_abort_when_llm_none(self) -> None:
+        """abort() is never called when _llm is None."""
+        client = LlamaCppClient(model_path="model.gguf")
+        # No way to verify a call on None; just assert no AttributeError raised.
+        await client.cancel()
+
+    @pytest.mark.asyncio
+    async def test_cancel_callable_multiple_times(self) -> None:
+        """cancel() can be called multiple times without error."""
+        client = _loaded_client()
+        await client.cancel()
+        await client.cancel()
+        await client.cancel()
+
+
 class TestSendRequest:
     """LlamaCppClient.send_request (task 6.1.3)."""
 
