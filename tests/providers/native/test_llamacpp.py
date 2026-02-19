@@ -256,6 +256,110 @@ def _fake_response() -> AgentResponse:
     )
 
 
+# ---------------------------------------------------------------------------
+# TestSyncGenerate
+# ---------------------------------------------------------------------------
+
+
+def _llm_output(
+    text: str = "response text",
+    prompt_tokens: int = 8,
+    completion_tokens: int = 4,
+) -> dict:
+    """Return a minimal llama-cpp-python output dict."""
+    return {
+        "choices": [{"text": text}],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        },
+    }
+
+
+class TestSyncGenerate:
+    """LlamaCppClient._sync_generate (task 6.1.4)."""
+
+    def test_sync_generate_returns_agent_response(self) -> None:
+        """_sync_generate returns an AgentResponse."""
+        client = _loaded_client()
+        client._llm = MagicMock(return_value=_llm_output())
+        result = client._sync_generate(AgentRequest(prompt="Hi"))
+        assert isinstance(result, AgentResponse)
+
+    def test_sync_generate_content_from_choices(self) -> None:
+        """AgentResponse.content is taken from choices[0].text."""
+        client = _loaded_client()
+        client._llm = MagicMock(return_value=_llm_output(text="The answer is 42"))
+        result = client._sync_generate(AgentRequest(prompt="Hi"))
+        assert result.content == "The answer is 42"
+
+    def test_sync_generate_model_is_model_path(self) -> None:
+        """AgentResponse.model is set to the _model_path string."""
+        client = LlamaCppClient(model_path="/opt/llama.gguf")
+        client._llm = MagicMock(return_value=_llm_output())
+        result = client._sync_generate(AgentRequest(prompt="Hi"))
+        assert result.model == "/opt/llama.gguf"
+
+    def test_sync_generate_input_tokens_from_usage(self) -> None:
+        """input_tokens is read from usage.prompt_tokens."""
+        client = _loaded_client()
+        client._llm = MagicMock(return_value=_llm_output(prompt_tokens=12))
+        result = client._sync_generate(AgentRequest(prompt="Hi"))
+        assert result.input_tokens == 12
+
+    def test_sync_generate_output_tokens_from_usage(self) -> None:
+        """output_tokens is read from usage.completion_tokens."""
+        client = _loaded_client()
+        client._llm = MagicMock(return_value=_llm_output(completion_tokens=7))
+        result = client._sync_generate(AgentRequest(prompt="Hi"))
+        assert result.output_tokens == 7
+
+    def test_sync_generate_tokens_default_to_zero_when_absent(self) -> None:
+        """Token counts default to 0 when usage is absent from the output."""
+        client = _loaded_client()
+        client._llm = MagicMock(
+            return_value={"choices": [{"text": "hi"}]}
+        )
+        result = client._sync_generate(AgentRequest(prompt="Hi"))
+        assert result.input_tokens == 0
+        assert result.output_tokens == 0
+
+    def test_sync_generate_passes_prompt(self) -> None:
+        """The prompt string is passed as the first positional argument to _llm."""
+        client = _loaded_client()
+        client._llm = MagicMock(return_value=_llm_output())
+        client._sync_generate(AgentRequest(prompt="Tell me a story"))
+        assert client._llm.call_args[0][0] == "Tell me a story"
+
+    def test_sync_generate_passes_max_tokens(self) -> None:
+        """max_tokens from the request is forwarded to _llm."""
+        client = _loaded_client()
+        client._llm = MagicMock(return_value=_llm_output())
+        client._sync_generate(AgentRequest(prompt="Hi", max_tokens=512))
+        assert client._llm.call_args[1]["max_tokens"] == 512
+
+    def test_sync_generate_passes_temperature(self) -> None:
+        """temperature from the request is forwarded to _llm."""
+        client = _loaded_client()
+        client._llm = MagicMock(return_value=_llm_output())
+        client._sync_generate(AgentRequest(prompt="Hi", temperature=0.5))
+        assert client._llm.call_args[1]["temperature"] == 0.5
+
+    def test_sync_generate_passes_stop_list(self) -> None:
+        """stop sequences from the request are forwarded to _llm."""
+        client = _loaded_client()
+        client._llm = MagicMock(return_value=_llm_output())
+        client._sync_generate(AgentRequest(prompt="Hi", stop=["END", "\n"]))
+        assert client._llm.call_args[1]["stop"] == ["END", "\n"]
+
+    def test_sync_generate_converts_none_stop_to_empty_list(self) -> None:
+        """When request.stop is None, _llm receives stop=[] not stop=None."""
+        client = _loaded_client()
+        client._llm = MagicMock(return_value=_llm_output())
+        client._sync_generate(AgentRequest(prompt="Hi"))
+        assert client._llm.call_args[1]["stop"] == []
+
+
 class TestSendRequest:
     """LlamaCppClient.send_request (task 6.1.3)."""
 
