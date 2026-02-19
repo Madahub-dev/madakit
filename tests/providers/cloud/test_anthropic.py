@@ -10,13 +10,20 @@ input_tokens/output_tokens defaults.
 Attachment support (task 4.2.4) — Attachment mapped to Anthropic image source
 blocks (base64-encoded bytes, media_type), text block appended after images.
 __repr__ (task 4.2.5) — API key redacted, model visible, exact format.
+Comprehensive integration (task 4.2.6) — full round-trip via MockTransport:
+endpoint routing, header forwarding, payload format, attachment propagation,
+health_check, context manager, token counts. Mock HTTP.
 """
 
 from __future__ import annotations
 
+import json
+
+import httpx
 import pytest
 
-from mada_modelkit._types import AgentRequest, AgentResponse
+from mada_modelkit._errors import ProviderError
+from mada_modelkit._types import AgentRequest, AgentResponse, Attachment
 from mada_modelkit.providers._http_base import HttpAgentClient
 from mada_modelkit.providers.cloud.anthropic import AnthropicClient
 
@@ -420,8 +427,6 @@ class TestParseResponse:
 
 import base64 as _base64
 
-from mada_modelkit._types import Attachment
-
 
 class TestAttachmentSupport:
     """AnthropicClient._build_payload attachment mapping (task 4.2.4)."""
@@ -519,3 +524,166 @@ class TestAttachmentSupport:
         payload = client._build_payload(_make_request(attachments=atts))
         content = payload["messages"][0]["content"]
         assert len(content) == 4  # 3 images + 1 text
+
+
+# ---------------------------------------------------------------------------
+# TestIntegration
+# ---------------------------------------------------------------------------
+
+
+def _anthropic_json_response(
+    text: str = "Hello",
+    model: str = "claude-sonnet-4-6",
+    input_tokens: int = 10,
+    output_tokens: int = 5,
+) -> bytes:
+    """Return a minimal Anthropic Messages API JSON response as bytes."""
+    return json.dumps(
+        {
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": text}],
+            "model": model,
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        }
+    ).encode()
+
+
+def _make_client(handler: httpx.MockTransport | None = None, api_key: str = "sk-ant-test") -> AnthropicClient:
+    """Return an AnthropicClient with an injected MockTransport."""
+    if handler is None:
+        handler = httpx.MockTransport(
+            lambda r: httpx.Response(200, content=_anthropic_json_response())
+        )
+    client = AnthropicClient(api_key=api_key)
+    client._http_client = httpx.AsyncClient(
+        base_url="https://api.anthropic.com/v1",
+        transport=handler,
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+    )
+    return client
+
+
+class TestIntegration:
+    """End-to-end integration tests for AnthropicClient using MockTransport."""
+
+    async def test_send_request_returns_agent_response(self) -> None:
+        """send_request returns an AgentResponse with the parsed content."""
+        client = _make_client()
+        result = await client.send_request(AgentRequest(prompt="Hi"))
+        assert isinstance(result, AgentResponse)
+        assert result.content == "Hello"
+
+    async def test_send_request_posts_to_messages_endpoint(self) -> None:
+        """send_request issues a POST to /messages."""
+        captured: list[str] = []
+
+        def handler(r: httpx.Request) -> httpx.Response:
+            captured.append(str(r.url.path))
+            return httpx.Response(200, content=_anthropic_json_response())
+
+        client = _make_client(httpx.MockTransport(handler))
+        await client.send_request(AgentRequest(prompt="Hi"))
+        assert captured[0].endswith("/messages")
+
+    async def test_send_request_forwards_x_api_key_header(self) -> None:
+        """send_request includes the x-api-key header in every request."""
+        captured: list[str] = []
+
+        def handler(r: httpx.Request) -> httpx.Response:
+            captured.append(r.headers.get("x-api-key", ""))
+            return httpx.Response(200, content=_anthropic_json_response())
+
+        client = _make_client(httpx.MockTransport(handler), api_key="sk-ant-mykey")
+        await client.send_request(AgentRequest(prompt="Hi"))
+        assert captured[0] == "sk-ant-mykey"
+
+    async def test_send_request_forwards_anthropic_version_header(self) -> None:
+        """send_request includes the anthropic-version header."""
+        captured: list[str] = []
+
+        def handler(r: httpx.Request) -> httpx.Response:
+            captured.append(r.headers.get("anthropic-version", ""))
+            return httpx.Response(200, content=_anthropic_json_response())
+
+        client = _make_client(httpx.MockTransport(handler))
+        await client.send_request(AgentRequest(prompt="Hi"))
+        assert captured[0] == "2023-06-01"
+
+    async def test_send_request_payload_uses_anthropic_format(self) -> None:
+        """Payload contains 'messages' array and no 'prompt' key (Anthropic format)."""
+        captured: list[dict] = []
+
+        def handler(r: httpx.Request) -> httpx.Response:
+            captured.append(json.loads(r.content))
+            return httpx.Response(200, content=_anthropic_json_response())
+
+        client = _make_client(httpx.MockTransport(handler))
+        await client.send_request(AgentRequest(prompt="Hello", system_prompt="Be helpful"))
+        payload = captured[0]
+        assert "messages" in payload
+        assert payload["system"] == "Be helpful"
+        assert payload["messages"][0]["role"] == "user"
+        assert "prompt" not in payload
+
+    async def test_send_request_with_attachment_sends_image_block(self) -> None:
+        """When request has an attachment, payload content is a list with an image block."""
+        captured: list[dict] = []
+
+        def handler(r: httpx.Request) -> httpx.Response:
+            captured.append(json.loads(r.content))
+            return httpx.Response(200, content=_anthropic_json_response())
+
+        client = _make_client(httpx.MockTransport(handler))
+        att = Attachment(content=b"imgdata", media_type="image/png")
+        await client.send_request(AgentRequest(prompt="Describe", attachments=[att]))
+        content = captured[0]["messages"][0]["content"]
+        assert isinstance(content, list)
+        assert content[0]["type"] == "image"
+
+    async def test_send_request_raises_provider_error_on_non_2xx(self) -> None:
+        """send_request wraps a non-2xx response as ProviderError with status_code."""
+        client = _make_client(
+            httpx.MockTransport(lambda r: httpx.Response(401, content=b"Unauthorized"))
+        )
+        with pytest.raises(ProviderError) as exc_info:
+            await client.send_request(AgentRequest(prompt="Hi"))
+        assert exc_info.value.status_code == 401
+
+    async def test_health_check_returns_true_on_200(self) -> None:
+        """health_check returns True when the server responds with 200."""
+        client = _make_client(
+            httpx.MockTransport(lambda r: httpx.Response(200, content=b"{}"))
+        )
+        assert await client.health_check() is True
+
+    async def test_health_check_returns_false_on_connect_error(self) -> None:
+        """health_check returns False on ConnectError."""
+        def handler(r: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("refused")
+
+        client = _make_client(httpx.MockTransport(handler))
+        assert await client.health_check() is False
+
+    async def test_context_manager_closes_http_client(self) -> None:
+        """Using AnthropicClient as a context manager closes the httpx client."""
+        async with AnthropicClient(api_key="sk-ant-test") as client:
+            is_closed_inside = client._http_client.is_closed
+        assert not is_closed_inside
+        assert client._http_client.is_closed
+
+    async def test_token_counts_flow_to_agent_response(self) -> None:
+        """Token counts from the Anthropic response reach AgentResponse."""
+        client = _make_client(
+            httpx.MockTransport(
+                lambda r: httpx.Response(
+                    200, content=_anthropic_json_response(input_tokens=25, output_tokens=40)
+                )
+            )
+        )
+        result = await client.send_request(AgentRequest(prompt="Hi"))
+        assert result.input_tokens == 25
+        assert result.output_tokens == 40
+        assert result.total_tokens == 65
