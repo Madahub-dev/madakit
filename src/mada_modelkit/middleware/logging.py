@@ -7,6 +7,7 @@ Zero external dependencies — stdlib only.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from typing import AsyncIterator
 
@@ -68,6 +69,28 @@ class LoggingMiddleware(BaseAgentClient):
 
         self._logger.info("Request started", extra=log_data)
 
+    def _log_response_completion(
+        self, request_id: str, response: AgentResponse, duration_ms: float
+    ) -> None:
+        """Log the completion of a request with response details.
+
+        Args:
+            request_id: Correlation ID from the request.
+            response: The response received.
+            duration_ms: Request duration in milliseconds.
+        """
+        log_data = {
+            "event": "request_complete",
+            "request_id": request_id,
+            "duration_ms": duration_ms,
+            "model": response.model,
+            "input_tokens": response.input_tokens,
+            "output_tokens": response.output_tokens,
+            "total_tokens": response.total_tokens,
+        }
+
+        self._logger.info("Request completed", extra=log_data)
+
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Execute request with logging.
 
@@ -75,7 +98,13 @@ class LoggingMiddleware(BaseAgentClient):
         """
         request_id = self._generate_request_id()
         self._log_request_start(request_id, request)
-        return await self._client.send_request(request)
+
+        start_time = time.perf_counter()
+        response = await self._client.send_request(request)
+        duration_ms = (time.perf_counter() - start_time) * 1000.0
+
+        self._log_response_completion(request_id, response, duration_ms)
+        return response
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
         """Stream response chunks with logging.
@@ -84,5 +113,25 @@ class LoggingMiddleware(BaseAgentClient):
         """
         request_id = self._generate_request_id()
         self._log_request_start(request_id, request)
+
+        start_time = time.perf_counter()
+        final_chunk = None
+
         async for chunk in self._client.send_request_stream(request):
+            if chunk.is_final:
+                final_chunk = chunk
             yield chunk
+
+        # Log completion with metadata from final chunk
+        if final_chunk is not None:
+            duration_ms = (time.perf_counter() - start_time) * 1000.0
+
+            # Build synthetic response from final chunk metadata
+            response = AgentResponse(
+                content="",  # Not included in logs
+                model=final_chunk.metadata.get("model", "unknown"),
+                input_tokens=final_chunk.metadata.get("input_tokens", 0),
+                output_tokens=final_chunk.metadata.get("output_tokens", 0),
+                metadata=final_chunk.metadata,
+            )
+            self._log_response_completion(request_id, response, duration_ms)

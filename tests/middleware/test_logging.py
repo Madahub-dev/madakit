@@ -301,3 +301,197 @@ class TestRequestLogging:
         # Should be parseable as UUID
         parsed = uuid.UUID(request_id)
         assert str(parsed) == request_id
+
+
+class TestResponseLogging:
+    """Test response logging with duration and token counts."""
+
+    @pytest.mark.asyncio
+    async def test_send_request_logs_response_completion(self, caplog) -> None:
+        """send_request logs response completion with duration."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        await middleware.send_request(request)
+
+        # Should have logged both request start and completion
+        assert len(caplog.records) == 2
+        assert "Request started" in caplog.text
+        assert "Request completed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_response_logging_includes_duration(self, caplog) -> None:
+        """Response log includes duration_ms."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        await middleware.send_request(request)
+
+        completion_log = caplog.records[1]
+        assert "duration_ms" in completion_log.__dict__
+        assert completion_log.__dict__["duration_ms"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_response_logging_includes_model(self, caplog) -> None:
+        """Response log includes model name."""
+        custom_response = AgentResponse(
+            content="test", model="gpt-4", input_tokens=10, output_tokens=20
+        )
+        mock = MockProvider(responses=[custom_response])
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        await middleware.send_request(request)
+
+        completion_log = caplog.records[1]
+        assert completion_log.__dict__["model"] == "gpt-4"
+
+    @pytest.mark.asyncio
+    async def test_response_logging_includes_token_counts(self, caplog) -> None:
+        """Response log includes input_tokens, output_tokens, total_tokens."""
+        custom_response = AgentResponse(
+            content="test", model="test-model", input_tokens=50, output_tokens=100
+        )
+        mock = MockProvider(responses=[custom_response])
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        await middleware.send_request(request)
+
+        completion_log = caplog.records[1]
+        assert completion_log.__dict__["input_tokens"] == 50
+        assert completion_log.__dict__["output_tokens"] == 100
+        assert completion_log.__dict__["total_tokens"] == 150
+
+    @pytest.mark.asyncio
+    async def test_response_logging_includes_request_id(self, caplog) -> None:
+        """Response log includes same request_id as request log."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        await middleware.send_request(request)
+
+        request_log = caplog.records[0]
+        completion_log = caplog.records[1]
+
+        request_id = request_log.__dict__["request_id"]
+        assert completion_log.__dict__["request_id"] == request_id
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_logs_response_completion(self, caplog) -> None:
+        """send_request_stream logs response completion."""
+
+        class MultiChunkProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="chunk1", is_final=False)
+                yield StreamChunk(
+                    delta="chunk2",
+                    is_final=True,
+                    metadata={"model": "test-model", "input_tokens": 10, "output_tokens": 20},
+                )
+
+        mock = MultiChunkProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        # Should have logged both request start and completion
+        assert len(caplog.records) == 2
+        assert "Request started" in caplog.text
+        assert "Request completed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_stream_completion_uses_final_chunk_metadata(self, caplog) -> None:
+        """Stream completion logs use metadata from final chunk."""
+
+        class TokenCountingProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="hello", is_final=False)
+                yield StreamChunk(
+                    delta="world",
+                    is_final=True,
+                    metadata={"model": "custom-model", "input_tokens": 25, "output_tokens": 50},
+                )
+
+        mock = TokenCountingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        completion_log = caplog.records[1]
+        assert completion_log.__dict__["model"] == "custom-model"
+        assert completion_log.__dict__["input_tokens"] == 25
+        assert completion_log.__dict__["output_tokens"] == 50
+        assert completion_log.__dict__["total_tokens"] == 75
+
+    @pytest.mark.asyncio
+    async def test_duration_measured_accurately(self, caplog) -> None:
+        """Duration is measured from request start to completion."""
+        import asyncio
+
+        # Mock with small latency
+        mock = MockProvider(latency=0.1)
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        await middleware.send_request(request)
+
+        completion_log = caplog.records[1]
+        duration_ms = completion_log.__dict__["duration_ms"]
+
+        # Duration should be at least the latency (100ms)
+        assert duration_ms >= 100
+
+    @pytest.mark.asyncio
+    async def test_stream_without_final_chunk_no_completion_log(self, caplog) -> None:
+        """Stream without final chunk doesn't log completion."""
+
+        class NoFinalChunkProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="chunk1", is_final=False)
+                yield StreamChunk(delta="chunk2", is_final=False)
+
+        mock = NoFinalChunkProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        # Should only have request start, no completion
+        assert len(caplog.records) == 1
+        assert "Request started" in caplog.text
