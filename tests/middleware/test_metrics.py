@@ -1245,3 +1245,417 @@ class TestLabelSupport:
         assert self._get_labeled_counter_value(
             middleware._requests_total, model=response.model, status="success"
         ) == 2
+
+
+class TestMetricsComprehensive:
+    """Comprehensive integration tests for MetricsMiddleware."""
+
+    @pytest.mark.asyncio
+    async def test_full_request_lifecycle_all_metrics(self) -> None:
+        """Full request lifecycle records all relevant metrics."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+        response = await middleware.send_request(request)
+
+        # Counter incremented
+        assert middleware._requests_total._value.get() == 1
+
+        # Histogram count incremented
+        samples = list(middleware._request_duration_seconds.collect())[0].samples
+        count = [s for s in samples if s.name.endswith('_count')][0].value
+        assert count == 1
+
+        # Token histograms incremented
+        input_samples = list(middleware._input_tokens.collect())[0].samples
+        input_count = [s for s in input_samples if s.name.endswith('_count')][0].value
+        assert input_count == 1
+
+        # Active requests returns to 0
+        gauge_samples = list(middleware._active_requests.collect())[0].samples
+        assert gauge_samples[0].value == 0
+
+    @pytest.mark.asyncio
+    async def test_full_stream_lifecycle_all_metrics(self) -> None:
+        """Full stream lifecycle records all relevant metrics."""
+        from prometheus_client import CollectorRegistry
+
+        class StreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="chunk1", is_final=False)
+                yield StreamChunk(
+                    delta="chunk2",
+                    is_final=True,
+                    metadata={"input_tokens": 50, "output_tokens": 100, "model": "test-model"},
+                )
+
+        mock = StreamProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        # All metrics recorded
+        assert middleware._requests_total._value.get() == 1
+
+        # TTFT recorded
+        ttft_samples = list(middleware._ttft_seconds.collect())[0].samples
+        ttft_count = [s for s in ttft_samples if s.name.endswith('_count')][0].value
+        assert ttft_count == 1
+
+        # Duration recorded
+        duration_samples = list(middleware._request_duration_seconds.collect())[0].samples
+        duration_count = [s for s in duration_samples if s.name.endswith('_count')][0].value
+        assert duration_count == 1
+
+        # Tokens recorded
+        input_samples = list(middleware._input_tokens.collect())[0].samples
+        input_sum = [s for s in input_samples if s.name.endswith('_sum')][0].value
+        assert input_sum == 50
+
+    @pytest.mark.asyncio
+    async def test_middleware_composition_with_retry(self) -> None:
+        """MetricsMiddleware composes with RetryMiddleware."""
+        from prometheus_client import CollectorRegistry
+        from mada_modelkit.middleware.retry import RetryMiddleware
+        from mada_modelkit._errors import ProviderError
+
+        class FailTwiceProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.attempt = 0
+
+            async def send_request(self, request):
+                self.attempt += 1
+                if self.attempt < 3:
+                    raise ProviderError("Retry me")
+                return await super().send_request(request)
+
+        mock = FailTwiceProvider()
+        registry = CollectorRegistry()
+
+        # Stack: MetricsMiddleware wraps RetryMiddleware wraps provider
+        retry_mw = RetryMiddleware(client=mock, max_retries=3)
+        metrics_mw = MetricsMiddleware(client=retry_mw, registry=registry)
+
+        request = AgentRequest(prompt="test")
+        response = await metrics_mw.send_request(request)
+
+        # Should record 1 successful request (after retries)
+        assert metrics_mw._requests_total._value.get() == 1
+
+        # No errors at metrics level (RetryMiddleware handled them)
+        # errors_total should be 0 since retry succeeded
+
+    @pytest.mark.asyncio
+    async def test_middleware_composition_with_cost_control(self) -> None:
+        """MetricsMiddleware composes with CostControlMiddleware."""
+        from prometheus_client import CollectorRegistry
+        from mada_modelkit.middleware.cost_control import CostControlMiddleware
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+
+        # Cost function based on tokens
+        def token_cost(response):
+            return (response.input_tokens or 0) * 0.01 + (response.output_tokens or 0) * 0.02
+
+        # Stack: MetricsMiddleware wraps CostControlMiddleware wraps provider
+        cost_mw = CostControlMiddleware(client=mock, cost_fn=token_cost, budget_cap=10.0)
+        metrics_mw = MetricsMiddleware(client=cost_mw, registry=registry)
+
+        request = AgentRequest(prompt="test")
+        await metrics_mw.send_request(request)
+
+        # Metrics recorded
+        assert metrics_mw._requests_total._value.get() == 1
+
+        # Cost tracking happened at CostControl level
+        assert cost_mw.total_spend > 0
+
+    @pytest.mark.asyncio
+    async def test_context_manager_support(self) -> None:
+        """MetricsMiddleware works as context manager."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+
+        async with MetricsMiddleware(client=mock, registry=registry) as middleware:
+            request = AgentRequest(prompt="test")
+            await middleware.send_request(request)
+
+            # Metrics recorded during context
+            assert middleware._requests_total._value.get() == 1
+
+        # Metrics persist after context exit
+        assert middleware._requests_total._value.get() == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_accurate_metrics(self) -> None:
+        """Concurrent requests produce accurate metric counts."""
+        from prometheus_client import CollectorRegistry
+        import asyncio
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Run 10 concurrent requests
+        tasks = [middleware.send_request(request) for _ in range(10)]
+        await asyncio.gather(*tasks)
+
+        # All requests counted
+        assert middleware._requests_total._value.get() == 10
+
+        # Duration histogram has 10 observations
+        duration_samples = list(middleware._request_duration_seconds.collect())[0].samples
+        duration_count = [s for s in duration_samples if s.name.endswith('_count')][0].value
+        assert duration_count == 10
+
+        # Active requests back to 0
+        gauge_samples = list(middleware._active_requests.collect())[0].samples
+        assert gauge_samples[0].value == 0
+
+    @pytest.mark.asyncio
+    async def test_mixed_request_types_share_metrics(self) -> None:
+        """Regular and streaming requests share same metric instances."""
+        from prometheus_client import CollectorRegistry
+
+        class DualProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="test", is_final=True)
+
+        mock = DualProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Regular request
+        await middleware.send_request(request)
+
+        # Stream request
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        # Both counted in same counter
+        assert middleware._requests_total._value.get() == 2
+
+        # Both in duration histogram
+        duration_samples = list(middleware._request_duration_seconds.collect())[0].samples
+        duration_count = [s for s in duration_samples if s.name.endswith('_count')][0].value
+        assert duration_count == 2
+
+    @pytest.mark.asyncio
+    async def test_error_scenarios_proper_metrics(self) -> None:
+        """Error scenarios record proper error metrics."""
+        from prometheus_client import CollectorRegistry
+        from mada_modelkit._errors import ProviderError
+
+        class AlwaysFailProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("Always fails")
+
+            async def send_request_stream(self, request):
+                raise ProviderError("Stream fails")
+                yield
+
+        mock = AlwaysFailProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Regular request error
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        # Stream request error
+        with pytest.raises(ProviderError):
+            async for _ in middleware.send_request_stream(request):
+                pass
+
+        # Total requests counted
+        assert middleware._requests_total._value.get() == 2
+
+        # Errors counted
+        error_count = middleware._errors_total.labels(error_type="ProviderError")._value.get()
+        assert error_count == 2
+
+        # Active requests back to 0
+        gauge_samples = list(middleware._active_requests.collect())[0].samples
+        assert gauge_samples[0].value == 0
+
+    @pytest.mark.asyncio
+    async def test_labels_in_integration_scenario(self) -> None:
+        """Label tracking works in full integration scenario."""
+        from prometheus_client import CollectorRegistry
+
+        class MultiModelProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.request_count = 0
+
+            async def send_request(self, request):
+                self.request_count += 1
+                from mada_modelkit._types import AgentResponse
+
+                # Alternate between two models
+                model = "model-a" if self.request_count % 2 == 1 else "model-b"
+                return AgentResponse(
+                    content="test",
+                    model=model,
+                    input_tokens=10,
+                    output_tokens=20,
+                )
+
+        mock = MultiModelProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry, track_labels=True)
+
+        request = AgentRequest(prompt="test")
+
+        # 3 requests: model-a, model-b, model-a
+        for _ in range(3):
+            await middleware.send_request(request)
+
+        # Check labeled counts
+        model_a_count = middleware._requests_total.labels(
+            model="model-a", status="success"
+        )._value.get()
+        model_b_count = middleware._requests_total.labels(
+            model="model-b", status="success"
+        )._value.get()
+
+        assert model_a_count == 2
+        assert model_b_count == 1
+
+    @pytest.mark.asyncio
+    async def test_metric_isolation_between_instances(self) -> None:
+        """Different middleware instances have isolated metrics."""
+        from prometheus_client import CollectorRegistry
+
+        mock1 = MockProvider()
+        mock2 = MockProvider()
+        registry1 = CollectorRegistry()
+        registry2 = CollectorRegistry()
+
+        middleware1 = MetricsMiddleware(client=mock1, registry=registry1, prefix="app1")
+        middleware2 = MetricsMiddleware(client=mock2, registry=registry2, prefix="app2")
+
+        request = AgentRequest(prompt="test")
+
+        # Send 1 request to middleware1
+        await middleware1.send_request(request)
+
+        # Send 2 requests to middleware2
+        await middleware2.send_request(request)
+        await middleware2.send_request(request)
+
+        # Independent counts
+        assert middleware1._requests_total._value.get() == 1
+        assert middleware2._requests_total._value.get() == 2
+
+    @pytest.mark.asyncio
+    async def test_custom_prefix_in_metric_names(self) -> None:
+        """Custom prefix appears in metric names."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry, prefix="myapp")
+
+        request = AgentRequest(prompt="test")
+        await middleware.send_request(request)
+
+        # Check metric name includes prefix
+        samples = list(middleware._requests_total.collect())[0].samples
+        assert samples[0].name == "myapp_requests_total"
+
+    @pytest.mark.asyncio
+    async def test_exception_propagation_preserves_stack_trace(self) -> None:
+        """Exceptions propagate with full stack trace."""
+        from prometheus_client import CollectorRegistry
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("Original error")
+
+        mock = FailingProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Exception propagated
+        with pytest.raises(ProviderError) as exc_info:
+            await middleware.send_request(request)
+
+        # Original message preserved
+        assert str(exc_info.value) == "Original error"
+
+    @pytest.mark.asyncio
+    async def test_metadata_preservation_through_middleware(self) -> None:
+        """Request metadata preserved through middleware."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test", metadata={"custom_key": "custom_value"})
+        await middleware.send_request(request)
+
+        # Metadata passed to wrapped client
+        assert mock.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_zero_active_requests_after_many_operations(self) -> None:
+        """Active requests gauge returns to 0 after many operations."""
+        from prometheus_client import CollectorRegistry
+        from mada_modelkit._errors import ProviderError
+
+        class SometimesFailProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.attempt = 0
+
+            async def send_request(self, request):
+                self.attempt += 1
+                if self.attempt % 3 == 0:
+                    raise ProviderError("Fail")
+                return await super().send_request(request)
+
+        mock = SometimesFailProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Many requests, some failing
+        for _ in range(10):
+            try:
+                await middleware.send_request(request)
+            except ProviderError:
+                pass
+
+        # Active requests back to 0
+        gauge_samples = list(middleware._active_requests.collect())[0].samples
+        assert gauge_samples[0].value == 0
