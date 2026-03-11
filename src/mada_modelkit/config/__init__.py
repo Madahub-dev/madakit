@@ -8,5 +8,12 @@ from mada_modelkit.config._schema import (
     ProviderConfig,
     StackConfig,
 )
+from mada_modelkit.config.loader import ConfigError, ConfigLoader
 
-__all__ = ["ProviderConfig", "MiddlewareConfig", "StackConfig"]
+__all__ = [
+    "ProviderConfig",
+    "MiddlewareConfig",
+    "StackConfig",
+    "ConfigLoader",
+    "ConfigError",
+]
