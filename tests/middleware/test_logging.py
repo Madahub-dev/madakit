@@ -143,3 +143,161 @@ class TestLoggingMiddlewareConstructor:
         assert mw2._logger is logger2
         assert mw1._log_level == logging.DEBUG
         assert mw2._log_level == logging.ERROR
+
+
+class TestRequestLogging:
+    """Test request logging with IDs and metadata."""
+
+    @pytest.mark.asyncio
+    async def test_send_request_logs_request_start(self, caplog) -> None:
+        """send_request logs request start with ID."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        await middleware.send_request(request)
+
+        # Should have logged request start
+        assert len(caplog.records) >= 1
+        assert "Request started" in caplog.text
+        assert "request_id" in caplog.records[0].__dict__
+
+    @pytest.mark.asyncio
+    async def test_request_id_is_unique(self, caplog) -> None:
+        """Each request gets a unique ID."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        await middleware.send_request(request)
+        first_id = caplog.records[0].__dict__.get("request_id")
+
+        caplog.clear()
+        await middleware.send_request(request)
+        second_id = caplog.records[0].__dict__.get("request_id")
+
+        assert first_id != second_id
+
+    @pytest.mark.asyncio
+    async def test_request_logging_includes_metadata(self, caplog) -> None:
+        """Request log includes max_tokens, temperature, and metadata."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(
+            prompt="test",
+            max_tokens=512,
+            temperature=0.9,
+            metadata={"user_id": "user123", "session": "abc"},
+        )
+
+        await middleware.send_request(request)
+
+        log_record = caplog.records[0]
+        assert log_record.__dict__["max_tokens"] == 512
+        assert log_record.__dict__["temperature"] == 0.9
+        assert log_record.__dict__["metadata"] == {"user_id": "user123", "session": "abc"}
+
+    @pytest.mark.asyncio
+    async def test_prompt_excluded_by_default(self, caplog) -> None:
+        """Prompt text is excluded from logs by default."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="secret prompt", system_prompt="secret system")
+
+        await middleware.send_request(request)
+
+        log_record = caplog.records[0]
+        assert "prompt" not in log_record.__dict__
+        assert "system_prompt" not in log_record.__dict__
+
+    @pytest.mark.asyncio
+    async def test_prompt_included_when_enabled(self, caplog) -> None:
+        """Prompt text is included when include_prompts=True."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO", include_prompts=True)
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test prompt", system_prompt="test system")
+
+        await middleware.send_request(request)
+
+        log_record = caplog.records[0]
+        assert log_record.__dict__["prompt"] == "test prompt"
+        assert log_record.__dict__["system_prompt"] == "test system"
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_logs_request_start(self, caplog) -> None:
+        """send_request_stream logs request start with ID."""
+        class MultiChunkProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="chunk", is_final=True)
+
+        mock = MultiChunkProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        # Should have logged request start
+        assert len(caplog.records) >= 1
+        assert "Request started" in caplog.text
+        assert "request_id" in caplog.records[0].__dict__
+
+    @pytest.mark.asyncio
+    async def test_log_level_filters_logs(self, caplog) -> None:
+        """Log level setting filters out lower-level logs."""
+        mock = MockProvider()
+
+        # WARNING level should not log INFO messages
+        middleware = LoggingMiddleware(client=mock, log_level="WARNING")
+
+        caplog.set_level(logging.WARNING)
+        request = AgentRequest(prompt="test")
+
+        await middleware.send_request(request)
+
+        # No logs because WARNING > INFO
+        assert len(caplog.records) == 0
+
+    @pytest.mark.asyncio
+    async def test_custom_logger_receives_logs(self, caplog) -> None:
+        """Custom logger instance receives log messages."""
+        mock = MockProvider()
+        custom_logger = logging.getLogger("custom_test_logger")
+        middleware = LoggingMiddleware(client=mock, logger=custom_logger, log_level="INFO")
+
+        caplog.set_level(logging.INFO, logger="custom_test_logger")
+        request = AgentRequest(prompt="test")
+
+        await middleware.send_request(request)
+
+        # Custom logger should have received the log
+        assert any(record.name == "custom_test_logger" for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_request_id_format_is_uuid(self) -> None:
+        """Request IDs are valid UUIDs."""
+        import uuid
+
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock)
+
+        request_id = middleware._generate_request_id()
+
+        # Should be parseable as UUID
+        parsed = uuid.UUID(request_id)
+        assert str(parsed) == request_id
