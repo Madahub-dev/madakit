@@ -59,22 +59,58 @@ class MetricsMiddleware(BaseAgentClient):
         else:
             self._registry = registry
 
-        # Will initialize metrics in task 9.2.2
-        self._metrics_initialized = False
+        # Initialize counter metrics
+        self._init_counters()
+
+    def _init_counters(self) -> None:
+        """Initialize Prometheus counter metrics."""
+        from prometheus_client import Counter
+
+        # Total requests counter
+        self._requests_total = Counter(
+            name=f"{self._prefix}_requests_total",
+            documentation="Total number of requests",
+            registry=self._registry,
+        )
+
+        # Errors by type counter
+        self._errors_total = Counter(
+            name=f"{self._prefix}_errors_total",
+            documentation="Total number of errors by type",
+            labelnames=["error_type"],
+            registry=self._registry,
+        )
 
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Execute request with metrics collection.
 
         Records request count, latency, and token usage.
         """
-        # Stub: will implement in task 9.2.2+
-        return await self._client.send_request(request)
+        # Increment total requests counter
+        self._requests_total.inc()
+
+        try:
+            response = await self._client.send_request(request)
+            return response
+        except Exception as exc:
+            # Increment error counter by type
+            error_type = type(exc).__name__
+            self._errors_total.labels(error_type=error_type).inc()
+            raise
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
         """Stream response chunks with metrics collection.
 
         Records request count, latency, TTFT, and token usage.
         """
-        # Stub: will implement in task 9.2.2+
-        async for chunk in self._client.send_request_stream(request):
-            yield chunk
+        # Increment total requests counter
+        self._requests_total.inc()
+
+        try:
+            async for chunk in self._client.send_request_stream(request):
+                yield chunk
+        except Exception as exc:
+            # Increment error counter by type
+            error_type = type(exc).__name__
+            self._errors_total.labels(error_type=error_type).inc()
+            raise
