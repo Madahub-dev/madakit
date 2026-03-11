@@ -889,3 +889,308 @@ class TestCorrelationIDPropagation:
         # Should be a valid UUID
         parsed = uuid.UUID(request_id)
         assert str(parsed) == request_id
+
+
+class TestLoggingComprehensive:
+    """Comprehensive integration tests for LoggingMiddleware."""
+
+    @pytest.mark.asyncio
+    async def test_full_request_lifecycle_logging(self, caplog) -> None:
+        """Complete request logs start, completion with all metadata."""
+        custom_response = AgentResponse(
+            content="response", model="gpt-4", input_tokens=50, output_tokens=100
+        )
+        mock = MockProvider(responses=[custom_response])
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(
+            prompt="test", max_tokens=200, temperature=0.8, metadata={"user": "alice"}
+        )
+
+        response = await middleware.send_request(request)
+
+        # Should have 2 logs: request start + completion
+        assert len(caplog.records) == 2
+
+        # Request start log
+        start_log = caplog.records[0]
+        assert start_log.__dict__["event"] == "request_start"
+        assert "request_id" in start_log.__dict__
+        assert start_log.__dict__["max_tokens"] == 200
+        assert start_log.__dict__["temperature"] == 0.8
+        assert start_log.__dict__["metadata"]["user"] == "alice"
+
+        # Completion log
+        completion_log = caplog.records[1]
+        assert completion_log.__dict__["event"] == "request_complete"
+        assert completion_log.__dict__["request_id"] == start_log.__dict__["request_id"]
+        assert completion_log.__dict__["model"] == "gpt-4"
+        assert completion_log.__dict__["input_tokens"] == 50
+        assert completion_log.__dict__["output_tokens"] == 100
+        assert completion_log.__dict__["duration_ms"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_error_request_lifecycle_logging(self, caplog) -> None:
+        """Failed request logs start and error (no completion)."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API failed", status_code=500)
+
+        mock = FailingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        # Should have 2 logs: request start + error (no completion)
+        assert len(caplog.records) == 2
+
+        start_log = caplog.records[0]
+        assert start_log.__dict__["event"] == "request_start"
+
+        error_log = caplog.records[1]
+        assert error_log.__dict__["event"] == "request_error"
+        assert error_log.__dict__["request_id"] == start_log.__dict__["request_id"]
+        assert error_log.__dict__["error_type"] == "ProviderError"
+        assert error_log.__dict__["error_message"] == "API failed"
+
+    @pytest.mark.asyncio
+    async def test_pii_filtering_excludes_prompts_by_default(self, caplog) -> None:
+        """With include_prompts=False, prompts are not in logs."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO", include_prompts=False)
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(
+            prompt="sensitive user data", system_prompt="system instructions"
+        )
+
+        await middleware.send_request(request)
+
+        # Check logs don't contain prompts
+        for record in caplog.records:
+            assert "prompt" not in record.__dict__
+            assert "system_prompt" not in record.__dict__
+
+        # Also check text output
+        assert "sensitive user data" not in caplog.text
+        assert "system instructions" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_pii_filtering_includes_prompts_when_enabled(self, caplog) -> None:
+        """With include_prompts=True, prompts are in logs."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO", include_prompts=True)
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test prompt", system_prompt="test system")
+
+        await middleware.send_request(request)
+
+        start_log = caplog.records[0]
+        assert start_log.__dict__["prompt"] == "test prompt"
+        assert start_log.__dict__["system_prompt"] == "test system"
+
+    @pytest.mark.asyncio
+    async def test_id_propagation_through_middleware_stack(self) -> None:
+        """Request ID propagates through multiple middleware layers."""
+        from mada_modelkit.middleware.retry import RetryMiddleware
+
+        class InspectingProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.received_requests = []
+
+            async def send_request(self, request):
+                self.received_requests.append(request)
+                return await super().send_request(request)
+
+        mock = InspectingProvider()
+        retry_mw = RetryMiddleware(client=mock, max_retries=1)
+        logging_mw = LoggingMiddleware(client=retry_mw, log_level="INFO")
+
+        custom_id = "trace-id-123"
+        request = AgentRequest(prompt="test", metadata={"request_id": custom_id})
+
+        await logging_mw.send_request(request)
+
+        # Provider should receive request with custom ID
+        assert len(mock.received_requests) == 1
+        assert mock.received_requests[0].metadata["request_id"] == custom_id
+
+    @pytest.mark.asyncio
+    async def test_middleware_composition_with_cost_control(self, caplog) -> None:
+        """LoggingMiddleware stacks with CostControlMiddleware."""
+        from mada_modelkit.middleware.cost_control import CostControlMiddleware
+
+        mock = MockProvider()
+        cost_fn = lambda resp: 1.5
+        cost_mw = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+        logging_mw = LoggingMiddleware(client=cost_mw, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        response = await logging_mw.send_request(request)
+
+        # Both middleware should work
+        assert response.content == "mock"
+        assert cost_mw.total_spend == 1.5
+        assert len(caplog.records) == 2  # Start + completion
+
+    @pytest.mark.asyncio
+    async def test_context_manager_support(self, caplog) -> None:
+        """LoggingMiddleware works as async context manager."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        async with middleware:
+            response = await middleware.send_request(request)
+
+        assert response.content == "mock"
+        assert len(caplog.records) == 2
+
+    @pytest.mark.asyncio
+    async def test_stream_full_lifecycle_logging(self, caplog) -> None:
+        """Stream request logs start and completion."""
+
+        class MultiChunkProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="chunk1", is_final=False)
+                yield StreamChunk(delta="chunk2", is_final=False)
+                yield StreamChunk(
+                    delta="chunk3",
+                    is_final=True,
+                    metadata={"model": "stream-model", "input_tokens": 15, "output_tokens": 30},
+                )
+
+        mock = MultiChunkProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test", metadata={"session": "abc"})
+
+        chunks = []
+        async for chunk in middleware.send_request_stream(request):
+            chunks.append(chunk)
+
+        # Should have 2 logs: start + completion
+        assert len(caplog.records) == 2
+
+        start_log = caplog.records[0]
+        assert start_log.__dict__["event"] == "request_start"
+        assert start_log.__dict__["metadata"]["session"] == "abc"
+
+        completion_log = caplog.records[1]
+        assert completion_log.__dict__["event"] == "request_complete"
+        assert completion_log.__dict__["model"] == "stream-model"
+        assert completion_log.__dict__["input_tokens"] == 15
+        assert completion_log.__dict__["output_tokens"] == 30
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_independent_logging(self, caplog) -> None:
+        """Concurrent requests have independent request IDs."""
+        import asyncio
+
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        # Send 3 concurrent requests
+        await asyncio.gather(
+            middleware.send_request(request),
+            middleware.send_request(request),
+            middleware.send_request(request),
+        )
+
+        # Should have 6 logs (2 per request)
+        assert len(caplog.records) == 6
+
+        # Extract request IDs
+        request_ids = set()
+        for i in range(0, 6, 2):  # Every start log
+            request_ids.add(caplog.records[i].__dict__["request_id"])
+
+        # All should be unique
+        assert len(request_ids) == 3
+
+    @pytest.mark.asyncio
+    async def test_log_output_structured_format(self, caplog) -> None:
+        """Log records contain structured data in extra fields."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        await middleware.send_request(request)
+
+        # All logs should have structured data
+        for record in caplog.records:
+            assert "event" in record.__dict__
+            assert "request_id" in record.__dict__
+            assert record.__dict__["event"] in ["request_start", "request_complete", "request_error"]
+
+    @pytest.mark.asyncio
+    async def test_different_log_levels_filter_correctly(self, caplog) -> None:
+        """Different log levels produce expected output."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("Error")
+
+        mock = FailingProvider()
+
+        # INFO level: sees request start and errors
+        mw_info = LoggingMiddleware(client=mock, log_level="INFO")
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            await mw_info.send_request(request)
+
+        assert len(caplog.records) == 2  # Start (INFO) + Error (ERROR)
+
+        caplog.clear()
+
+        # ERROR level: only sees errors
+        mw_error = LoggingMiddleware(client=mock, log_level="ERROR")
+        caplog.set_level(logging.ERROR)
+
+        with pytest.raises(ProviderError):
+            await mw_error.send_request(request)
+
+        assert len(caplog.records) == 1  # Only error
+
+    @pytest.mark.asyncio
+    async def test_logging_with_timeout_middleware(self, caplog) -> None:
+        """LoggingMiddleware works with TimeoutMiddleware."""
+        import asyncio
+        from mada_modelkit.middleware.timeout import TimeoutMiddleware
+
+        mock = MockProvider()
+        timeout_mw = TimeoutMiddleware(client=mock, timeout_seconds=1.0)
+        logging_mw = LoggingMiddleware(client=timeout_mw, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        response = await logging_mw.send_request(request)
+
+        assert response.content == "mock"
+        assert len(caplog.records) == 2
