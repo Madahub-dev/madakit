@@ -54,7 +54,25 @@ class TimeoutMiddleware(BaseAgentClient):
 
         Timeout applies only to the arrival of the first chunk.
         Once streaming begins, subsequent chunks are not subject to timeout.
+
+        Args:
+            request: The request to send.
+
+        Yields:
+            Stream chunks from the wrapped client.
+
+        Raises:
+            asyncio.TimeoutError: If the first chunk does not arrive within timeout_seconds.
         """
-        # Stub: will implement in task 8.3.3
-        async for chunk in self._client.send_request_stream(request):
+        stream = self._client.send_request_stream(request)
+        iterator = stream.__aiter__()
+
+        # Apply timeout to first chunk only
+        first_chunk = await asyncio.wait_for(
+            iterator.__anext__(), timeout=self._timeout_seconds
+        )
+        yield first_chunk
+
+        # Stream remaining chunks without timeout
+        async for chunk in iterator:
             yield chunk

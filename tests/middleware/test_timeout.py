@@ -244,3 +244,189 @@ class TestSendRequestWithTimeout:
         await middleware.send_request(request)
 
         assert mock.call_count == 2
+
+
+class TestSendRequestStreamWithTimeout:
+    """Test send_request_stream timeout enforcement (first chunk only)."""
+
+    @pytest.mark.asyncio
+    async def test_fast_stream_succeeds(self) -> None:
+        """Fast streams complete successfully within timeout."""
+
+        class MultiChunkProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="chunk1", is_final=False)
+                yield StreamChunk(delta="chunk2", is_final=False)
+                yield StreamChunk(delta="chunk3", is_final=True)
+
+        mock = MultiChunkProvider()
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=1.0)
+
+        request = AgentRequest(prompt="test")
+        chunks = []
+        async for chunk in middleware.send_request_stream(request):
+            chunks.append(chunk)
+
+        assert len(chunks) == 3
+        assert chunks[0].delta == "chunk1"
+        assert chunks[2].delta == "chunk3"
+        assert mock.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_slow_first_chunk_raises_timeout(self) -> None:
+        """Stream with slow first chunk raises asyncio.TimeoutError."""
+        import asyncio
+
+        class SlowFirstChunkProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                await asyncio.sleep(0.3)  # Delay before first chunk
+                yield StreamChunk(delta="chunk1", is_final=True)
+
+        mock = SlowFirstChunkProvider()
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=0.1)
+
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(asyncio.TimeoutError):
+            async for _ in middleware.send_request_stream(request):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_subsequent_chunks_not_subject_to_timeout(self) -> None:
+        """After first chunk, subsequent chunks can be slow without timeout."""
+        import asyncio
+
+        class SlowSubsequentChunksProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                # First chunk arrives quickly
+                yield StreamChunk(delta="chunk1", is_final=False)
+                # Subsequent chunks are slow
+                await asyncio.sleep(0.3)
+                yield StreamChunk(delta="chunk2", is_final=False)
+                await asyncio.sleep(0.3)
+                yield StreamChunk(delta="chunk3", is_final=True)
+
+        mock = SlowSubsequentChunksProvider()
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=0.1)
+
+        request = AgentRequest(prompt="test")
+        chunks = []
+
+        # Should succeed despite slow subsequent chunks
+        async for chunk in middleware.send_request_stream(request):
+            chunks.append(chunk)
+
+        assert len(chunks) == 3
+        assert chunks[0].delta == "chunk1"
+        assert chunks[1].delta == "chunk2"
+        assert chunks[2].delta == "chunk3"
+
+    @pytest.mark.asyncio
+    async def test_single_chunk_stream(self) -> None:
+        """Stream with single chunk works correctly."""
+
+        class SingleChunkProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="only chunk", is_final=True)
+
+        mock = SingleChunkProvider()
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=1.0)
+
+        request = AgentRequest(prompt="test")
+        chunks = []
+        async for chunk in middleware.send_request_stream(request):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert chunks[0].delta == "only chunk"
+        assert chunks[0].is_final is True
+
+    @pytest.mark.asyncio
+    async def test_stream_exception_propagation(self) -> None:
+        """Exceptions from wrapped client stream propagate correctly."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingStreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                raise ProviderError("Stream error", status_code=500)
+                yield  # Make it a generator
+
+        mock = FailingStreamProvider()
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=1.0)
+
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError, match="Stream error"):
+            async for _ in middleware.send_request_stream(request):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_timeout_value_respected_for_first_chunk(self) -> None:
+        """Different timeout values are respected for first chunk."""
+        import asyncio
+
+        class DelayedFirstChunkProvider(MockProvider):
+            def __init__(self, delay):
+                super().__init__()
+                self.delay = delay
+
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                await asyncio.sleep(self.delay)
+                yield StreamChunk(delta="chunk", is_final=True)
+
+        request = AgentRequest(prompt="test")
+
+        # 0.2s delay with 0.1s timeout fails
+        mock1 = DelayedFirstChunkProvider(delay=0.2)
+        mw1 = TimeoutMiddleware(client=mock1, timeout_seconds=0.1)
+
+        with pytest.raises(asyncio.TimeoutError):
+            async for _ in mw1.send_request_stream(request):
+                pass
+
+        # 0.2s delay with 0.5s timeout succeeds
+        mock2 = DelayedFirstChunkProvider(delay=0.2)
+        mw2 = TimeoutMiddleware(client=mock2, timeout_seconds=0.5)
+
+        chunks = []
+        async for chunk in mw2.send_request_stream(request):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_stream_times_out(self) -> None:
+        """Stream that yields no chunks times out waiting for first chunk."""
+        import asyncio
+
+        class EmptyStreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                await asyncio.sleep(0.5)
+                return
+                yield  # Make it a generator
+
+        mock = EmptyStreamProvider()
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=0.1)
+
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(asyncio.TimeoutError):
+            async for _ in middleware.send_request_stream(request):
+                pass
