@@ -22,6 +22,7 @@ from mada_modelkit.middleware import (
     ABTestMiddleware,
     CachingMiddleware,
     CircuitBreakerMiddleware,
+    ContentFilterMiddleware,
     FallbackMiddleware,
     RetryMiddleware,
     TrackingMiddleware,
@@ -43,6 +44,7 @@ __all__ = [
     "RetryMiddleware",
     "CircuitBreakerMiddleware",
     "CachingMiddleware",
+    "ContentFilterMiddleware",
     "TrackingMiddleware",
     "FallbackMiddleware",
 ]
