@@ -94,14 +94,26 @@ class CostControlMiddleware(BaseAgentClient):
 
         Delegates to wrapped client, then increments spend.
         """
-        # Stub: will implement in task 8.2.5
-        return await self._client.send_request(request)
+        response = await self._client.send_request(request)
+        self._track_cost(response)
+        return response
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
         """Stream response chunks and track cost.
 
         Delegates to wrapped client, streams chunks, then increments spend.
+        Constructs a synthetic AgentResponse from the final chunk's metadata
+        to calculate cost.
         """
-        # Stub: will implement in task 8.2.5
         async for chunk in self._client.send_request_stream(request):
+            if chunk.is_final:
+                # Build synthetic response from final chunk metadata for cost tracking
+                response = AgentResponse(
+                    content="",  # Content not needed for cost_fn
+                    model=chunk.metadata.get("model", "unknown"),
+                    input_tokens=chunk.metadata.get("input_tokens", 0),
+                    output_tokens=chunk.metadata.get("output_tokens", 0),
+                    metadata=chunk.metadata,
+                )
+                self._track_cost(response)
             yield chunk
