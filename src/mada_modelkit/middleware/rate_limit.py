@@ -56,6 +56,32 @@ class RateLimitMiddleware(BaseAgentClient):  # pylint: disable=too-many-instance
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
+    def _refill_tokens(self) -> None:
+        """Refill tokens based on elapsed time since last refill (token bucket only).
+
+        Called within _lock context. Updates _tokens up to _max_tokens based on
+        requests_per_second rate and elapsed time.
+        """
+        now = time.monotonic()
+        elapsed = now - self._last_refill
+        self._tokens = min(self._max_tokens, self._tokens + elapsed * self._requests_per_second)
+        self._last_refill = now
+
+    async def _acquire_token(self) -> None:
+        """Acquire a token from the bucket, blocking until one is available (token bucket only).
+
+        Refills tokens, then waits (with exponential backoff polling) until at least
+        one token is available. Consumes exactly one token before returning.
+        """
+        while True:
+            async with self._lock:
+                self._refill_tokens()
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+            # No token available: sleep and retry
+            await asyncio.sleep(0.01)  # 10ms poll interval
+
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Execute request after acquiring rate limit token/slot.
 

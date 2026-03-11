@@ -7,6 +7,8 @@ burst handling, and integration with the BaseAgentClient contract.
 from __future__ import annotations
 
 import asyncio
+import time
+
 import pytest
 
 from mada_modelkit._errors import AgentError
@@ -139,3 +141,150 @@ class TestRateLimitMiddlewareConstructor:
         middleware = RateLimitMiddleware(client=mock)
         # Inherits from BaseAgentClient, so should have _semaphore attribute
         assert hasattr(middleware, "_semaphore")
+
+
+class TestTokenBucketAlgorithm:
+    """Test token bucket refill and acquisition logic."""
+
+    def test_refill_tokens_adds_tokens_over_time(self) -> None:
+        """Tokens increase based on elapsed time and requests_per_second."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="token_bucket")
+
+        # Start with full bucket
+        initial_tokens = middleware._tokens
+        assert initial_tokens == 10.0
+
+        # Consume all tokens
+        middleware._tokens = 0.0
+        middleware._last_refill = middleware._last_refill - 0.5  # Simulate 0.5s elapsed
+
+        # Refill should add 5 tokens (10 tokens/sec * 0.5 sec)
+        middleware._refill_tokens()
+        assert abs(middleware._tokens - 5.0) < 0.01
+
+    def test_refill_tokens_caps_at_max_tokens(self) -> None:
+        """Tokens cannot exceed max_tokens."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="token_bucket")
+
+        # Simulate 10 seconds elapsed with no consumption
+        middleware._last_refill = middleware._last_refill - 10.0
+        middleware._refill_tokens()
+
+        # Should cap at max_tokens (10.0), not accumulate to 100
+        assert middleware._tokens == middleware._max_tokens
+        assert middleware._tokens == 10.0
+
+    def test_refill_tokens_updates_last_refill(self) -> None:
+        """_refill_tokens updates _last_refill timestamp."""
+        import time
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="token_bucket")
+
+        old_refill_time = middleware._last_refill
+        time.sleep(0.01)  # Small sleep to ensure time advances
+        middleware._refill_tokens()
+
+        assert middleware._last_refill > old_refill_time
+
+    @pytest.mark.asyncio
+    async def test_acquire_token_consumes_one_token(self) -> None:
+        """_acquire_token consumes exactly one token."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="token_bucket")
+
+        initial_tokens = middleware._tokens
+        await middleware._acquire_token()
+
+        assert abs(middleware._tokens - (initial_tokens - 1.0)) < 0.01
+
+    @pytest.mark.asyncio
+    async def test_acquire_token_blocks_when_empty(self) -> None:
+        """_acquire_token blocks until tokens are available."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=100.0, strategy="token_bucket")
+
+        # Consume all tokens
+        middleware._tokens = 0.0
+
+        # This should block briefly, then succeed as tokens refill
+        start = time.monotonic()
+        await middleware._acquire_token()
+        elapsed = time.monotonic() - start
+
+        # Should have waited at least 10ms (one poll interval)
+        assert elapsed >= 0.01
+        assert middleware._tokens < middleware._max_tokens  # One token consumed
+
+    @pytest.mark.asyncio
+    async def test_acquire_token_multiple_sequential(self) -> None:
+        """Multiple sequential acquisitions work correctly."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, burst_size=5, strategy="token_bucket"
+        )
+
+        # Start with 5 tokens
+        assert middleware._tokens == 5.0
+
+        # Acquire 3 tokens
+        await middleware._acquire_token()
+        await middleware._acquire_token()
+        await middleware._acquire_token()
+
+        # Should have 2 tokens left (plus any refill from elapsed time)
+        assert middleware._tokens >= 2.0 and middleware._tokens < 3.0
+
+    @pytest.mark.asyncio
+    async def test_acquire_token_concurrent_safe(self) -> None:
+        """Concurrent token acquisitions are thread-safe."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=100.0, burst_size=10, strategy="token_bucket"
+        )
+
+        # Start with 10 tokens
+        assert middleware._tokens == 10.0
+
+        # Acquire 10 tokens concurrently
+        await asyncio.gather(*[middleware._acquire_token() for _ in range(10)])
+
+        # All tokens consumed (plus minimal refill during execution)
+        assert middleware._tokens < 1.0
+
+    @pytest.mark.asyncio
+    async def test_acquire_token_refills_before_checking(self) -> None:
+        """_acquire_token refills before checking availability."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="token_bucket")
+
+        # Deplete tokens
+        middleware._tokens = 0.0
+        middleware._last_refill = time.monotonic() - 0.2  # Simulate 0.2s elapsed
+
+        # Should refill 2 tokens (10/sec * 0.2sec), then consume 1
+        await middleware._acquire_token()
+        assert abs(middleware._tokens - 1.0) < 0.1  # ~1 token remaining
+
+    def test_refill_tokens_with_custom_rate(self) -> None:
+        """Token refill respects custom requests_per_second."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=5.0, strategy="token_bucket")
+
+        middleware._tokens = 0.0
+        middleware._last_refill = middleware._last_refill - 1.0  # 1 second elapsed
+
+        middleware._refill_tokens()
+        assert abs(middleware._tokens - 5.0) < 0.01  # 5 tokens/sec * 1 sec
+
+    def test_refill_tokens_fractional_accumulation(self) -> None:
+        """Tokens accumulate as floats for fractional rates."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=2.5, strategy="token_bucket")
+
+        middleware._tokens = 0.0
+        middleware._last_refill = middleware._last_refill - 0.4  # 0.4 seconds
+
+        middleware._refill_tokens()
+        assert abs(middleware._tokens - 1.0) < 0.01  # 2.5 * 0.4 = 1.0
