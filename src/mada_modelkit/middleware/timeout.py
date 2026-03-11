@@ -6,6 +6,7 @@ Zero external dependencies — stdlib only.
 
 from __future__ import annotations
 
+import asyncio
 from typing import AsyncIterator
 
 from mada_modelkit._base import BaseAgentClient
@@ -33,9 +34,20 @@ class TimeoutMiddleware(BaseAgentClient):
         """Execute request with timeout.
 
         Delegates to wrapped client with asyncio.wait_for timeout enforcement.
+        Raises asyncio.TimeoutError if the request exceeds timeout_seconds.
+
+        Args:
+            request: The request to send.
+
+        Returns:
+            The response from the wrapped client.
+
+        Raises:
+            asyncio.TimeoutError: If the request exceeds the timeout.
         """
-        # Stub: will implement in task 8.3.2
-        return await self._client.send_request(request)
+        return await asyncio.wait_for(
+            self._client.send_request(request), timeout=self._timeout_seconds
+        )
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
         """Stream response chunks with timeout on first chunk.
