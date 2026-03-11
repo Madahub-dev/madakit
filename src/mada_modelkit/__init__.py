@@ -20,6 +20,7 @@ from mada_modelkit._types import (
 )
 from mada_modelkit.middleware import (
     ABTestMiddleware,
+    BatchingMiddleware,
     CachingMiddleware,
     CircuitBreakerMiddleware,
     ContentFilterMiddleware,
@@ -44,6 +45,7 @@ __all__ = [
     "RetryExhaustedError",
     "MiddlewareError",
     "ABTestMiddleware",
+    "BatchingMiddleware",
     "RetryMiddleware",
     "CircuitBreakerMiddleware",
     "CachingMiddleware",

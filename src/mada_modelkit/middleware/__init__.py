@@ -5,6 +5,7 @@ Zero external dependencies — stdlib only.
 """
 
 from mada_modelkit.middleware.ab_test import ABTestMiddleware
+from mada_modelkit.middleware.batching import BatchingMiddleware
 from mada_modelkit.middleware.cache import CachingMiddleware
 from mada_modelkit.middleware.circuit_breaker import CircuitBreakerMiddleware
 from mada_modelkit.middleware.content_filter import ContentFilterMiddleware
@@ -17,6 +18,7 @@ from mada_modelkit.middleware.tracking import TrackingMiddleware
 
 __all__ = [
     "ABTestMiddleware",
+    "BatchingMiddleware",
     "CachingMiddleware",
     "CircuitBreakerMiddleware",
     "ContentFilterMiddleware",
