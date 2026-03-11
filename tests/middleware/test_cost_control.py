@@ -402,3 +402,219 @@ class TestBudgetCapEnforcement:
         from mada_modelkit._errors import BudgetExceededError, MiddlewareError
 
         assert issubclass(BudgetExceededError, MiddlewareError)
+
+
+class TestAlertCallbacks:
+    """Test alert callback triggering and threshold detection."""
+
+    def test_alert_fires_when_threshold_crossed(self) -> None:
+        """on_alert is called when spending crosses alert_threshold."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 5.0
+        alert_calls = []
+
+        def alert_callback(current, threshold):
+            alert_calls.append((current, threshold))
+
+        middleware = CostControlMiddleware(
+            client=mock, cost_fn=cost_fn, budget_cap=10.0, alert_threshold=0.8, on_alert=alert_callback
+        )
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+
+        # First request: 5.0 (below 8.0 threshold)
+        middleware._track_cost(response)
+        assert len(alert_calls) == 0
+
+        # Second request: 10.0 (crosses 8.0 threshold)
+        middleware._track_cost(response)
+        assert len(alert_calls) == 1
+        assert alert_calls[0][0] == 10.0  # current spend
+        assert alert_calls[0][1] == 8.0   # threshold amount
+
+    def test_alert_fires_only_once(self) -> None:
+        """Alert callback is called only once, not on subsequent requests."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 3.0
+        alert_calls = []
+
+        def alert_callback(current, threshold):
+            alert_calls.append((current, threshold))
+
+        middleware = CostControlMiddleware(
+            client=mock, cost_fn=cost_fn, budget_cap=10.0, alert_threshold=0.5, on_alert=alert_callback
+        )
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+
+        # First request: 3.0 (below 5.0)
+        middleware._track_cost(response)
+        # Second request: 6.0 (crosses 5.0 threshold, alert fires)
+        middleware._track_cost(response)
+        # Third request: 9.0 (still above threshold, alert should not fire again)
+        middleware._track_cost(response)
+
+        assert len(alert_calls) == 1
+
+    def test_no_alert_without_callback(self) -> None:
+        """No error when on_alert is None."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 5.0
+        middleware = CostControlMiddleware(
+            client=mock, cost_fn=cost_fn, budget_cap=10.0, alert_threshold=0.5
+        )  # No on_alert
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        # Should not raise even when crossing threshold
+        middleware._track_cost(response)
+        middleware._track_cost(response)
+
+        assert middleware.total_spend == 10.0
+
+    def test_no_alert_without_budget_cap(self) -> None:
+        """Alert doesn't fire when budget_cap is None."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 10.0
+        alert_calls = []
+
+        def alert_callback(current, threshold):
+            alert_calls.append((current, threshold))
+
+        middleware = CostControlMiddleware(
+            client=mock, cost_fn=cost_fn, on_alert=alert_callback
+        )  # No budget_cap
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        middleware._track_cost(response)
+
+        # No alert without budget_cap
+        assert len(alert_calls) == 0
+
+    def test_alert_threshold_calculation(self) -> None:
+        """Alert threshold is calculated as budget_cap * alert_threshold."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 7.0
+        alert_calls = []
+
+        def alert_callback(current, threshold):
+            alert_calls.append((current, threshold))
+
+        # 20.0 * 0.75 = 15.0 threshold
+        middleware = CostControlMiddleware(
+            client=mock, cost_fn=cost_fn, budget_cap=20.0, alert_threshold=0.75, on_alert=alert_callback
+        )
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+
+        # First request: 7.0 (below 15.0)
+        middleware._track_cost(response)
+        assert len(alert_calls) == 0
+
+        # Second request: 14.0 (still below 15.0)
+        middleware._track_cost(response)
+        assert len(alert_calls) == 0
+
+        # Third request: 21.0 (crosses 15.0)
+        # But this would exceed cap (21.0 > 20.0), so it will raise
+        from mada_modelkit._errors import BudgetExceededError
+        with pytest.raises(BudgetExceededError):
+            middleware._track_cost(response)
+
+    def test_alert_at_exact_threshold(self) -> None:
+        """Alert fires when spending exactly matches threshold."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 4.0
+        alert_calls = []
+
+        def alert_callback(current, threshold):
+            alert_calls.append((current, threshold))
+
+        # 10.0 * 0.8 = 8.0 threshold
+        middleware = CostControlMiddleware(
+            client=mock, cost_fn=cost_fn, budget_cap=10.0, alert_threshold=0.8, on_alert=alert_callback
+        )
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+
+        # First request: 4.0
+        middleware._track_cost(response)
+        # Second request: 8.0 (exactly at threshold)
+        middleware._track_cost(response)
+
+        assert len(alert_calls) == 1
+        assert alert_calls[0][1] == 8.0
+
+    def test_alert_with_custom_threshold(self) -> None:
+        """Custom alert_threshold values work correctly."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 3.0
+        alert_calls = []
+
+        def alert_callback(current, threshold):
+            alert_calls.append((current, threshold))
+
+        # 10.0 * 0.9 = 9.0 threshold
+        middleware = CostControlMiddleware(
+            client=mock, cost_fn=cost_fn, budget_cap=10.0, alert_threshold=0.9, on_alert=alert_callback
+        )
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+
+        # First request: 3.0
+        middleware._track_cost(response)
+        # Second request: 6.0
+        middleware._track_cost(response)
+        # Third request: 9.0 (crosses 9.0 threshold)
+        middleware._track_cost(response)
+
+        assert len(alert_calls) == 1
+        assert alert_calls[0][0] == 9.0
+        assert alert_calls[0][1] == 9.0
+
+    def test_alert_fired_flag_set(self) -> None:
+        """_alert_fired flag is set after alert fires."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 5.0
+        alert_calls = []
+
+        def alert_callback(current, threshold):
+            alert_calls.append((current, threshold))
+
+        middleware = CostControlMiddleware(
+            client=mock, cost_fn=cost_fn, budget_cap=10.0, alert_threshold=0.8, on_alert=alert_callback
+        )
+
+        assert middleware._alert_fired is False
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        middleware._track_cost(response)
+
+        assert middleware._alert_fired is False
+
+        middleware._track_cost(response)
+
+        assert middleware._alert_fired is True
+
+    def test_alert_callback_receives_correct_values(self) -> None:
+        """Alert callback receives current spend and threshold amount."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 6.0
+        received_current = None
+        received_threshold = None
+
+        def alert_callback(current, threshold):
+            nonlocal received_current, received_threshold
+            received_current = current
+            received_threshold = threshold
+
+        # 15.0 * 0.6 = 9.0 threshold
+        middleware = CostControlMiddleware(
+            client=mock, cost_fn=cost_fn, budget_cap=15.0, alert_threshold=0.6, on_alert=alert_callback
+        )
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        middleware._track_cost(response)  # 6.0
+        middleware._track_cost(response)  # 12.0 (crosses 9.0)
+
+        assert received_current == 12.0
+        assert received_threshold == 9.0

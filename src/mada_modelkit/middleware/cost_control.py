@@ -53,6 +53,7 @@ class CostControlMiddleware(BaseAgentClient):
 
         Calls cost_fn to determine cost, then adds to total_spend.
         If budget_cap is set and would be exceeded, raises BudgetExceededError.
+        If alert threshold is crossed, calls on_alert callback (once).
 
         Args:
             response: The response to calculate cost for.
@@ -69,7 +70,19 @@ class CostControlMiddleware(BaseAgentClient):
                 f"(current: {self._total_spend:.2f}, cost: {cost:.2f})"
             )
 
+        # Add cost to total
         self._total_spend += cost
+
+        # Check if alert threshold crossed (only fire once)
+        if (
+            self._budget_cap is not None
+            and self._on_alert is not None
+            and not self._alert_fired
+        ):
+            threshold_amount = self._budget_cap * self._alert_threshold
+            if self._total_spend >= threshold_amount:
+                self._alert_fired = True
+                self._on_alert(self._total_spend, threshold_amount)
 
     @property
     def total_spend(self) -> float:
