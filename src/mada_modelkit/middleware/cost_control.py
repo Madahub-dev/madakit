@@ -47,6 +47,22 @@ class CostControlMiddleware(BaseAgentClient):
         self._total_spend = 0.0
         self._alert_fired = False
 
+    def _track_cost(self, response: AgentResponse) -> None:
+        """Calculate and accumulate cost for a response.
+
+        Calls cost_fn to determine cost, then adds to total_spend.
+
+        Args:
+            response: The response to calculate cost for.
+        """
+        cost = self._cost_fn(response)
+        self._total_spend += cost
+
+    @property
+    def total_spend(self) -> float:
+        """Return the current total spend."""
+        return self._total_spend
+
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Execute request and track cost.
 
