@@ -939,3 +939,309 @@ class TestGaugeMetrics:
 
             # After request
             assert self._get_gauge_value(middleware._active_requests) == 0
+
+
+class TestLabelSupport:
+    """Test label support for model and status tracking."""
+
+    def _get_labeled_counter_value(self, counter, **labels) -> float:
+        """Get counter value for specific labels."""
+        return counter.labels(**labels)._value.get()
+
+    def _get_labeled_histogram_count(self, histogram, **labels) -> float:
+        """Get histogram count for specific labels."""
+        labeled_metric = histogram.labels(**labels)
+        samples = list(labeled_metric.collect())[0].samples
+        count_sample = [s for s in samples if s.name.endswith('_count')][0]
+        return count_sample.value
+
+    @pytest.mark.asyncio
+    async def test_track_labels_false_by_default(self) -> None:
+        """track_labels defaults to False."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        assert middleware._track_labels is False
+
+    @pytest.mark.asyncio
+    async def test_track_labels_true_enables_labeling(self) -> None:
+        """track_labels=True enables model and status labels."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry, track_labels=True)
+
+        assert middleware._track_labels is True
+
+    @pytest.mark.asyncio
+    async def test_requests_total_with_model_and_status_labels(self) -> None:
+        """requests_total uses model and status labels when enabled."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry, track_labels=True)
+
+        request = AgentRequest(prompt="test")
+        response = await middleware.send_request(request)
+
+        # Should have labeled counter for this model and success status
+        count = self._get_labeled_counter_value(
+            middleware._requests_total,
+            model=response.model,
+            status="success"
+        )
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_different_models_tracked_separately(self) -> None:
+        """Different models tracked with separate label values."""
+        from prometheus_client import CollectorRegistry
+
+        class MultiModelProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.call_count = 0
+
+            async def send_request(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import AgentResponse
+
+                model = f"model-{self.call_count}"
+                return AgentResponse(
+                    content="test",
+                    model=model,
+                    input_tokens=10,
+                    output_tokens=20,
+                )
+
+        mock = MultiModelProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry, track_labels=True)
+
+        request = AgentRequest(prompt="test")
+
+        # Request 1: model-1
+        await middleware.send_request(request)
+        assert self._get_labeled_counter_value(
+            middleware._requests_total, model="model-1", status="success"
+        ) == 1
+
+        # Request 2: model-2
+        await middleware.send_request(request)
+        assert self._get_labeled_counter_value(
+            middleware._requests_total, model="model-2", status="success"
+        ) == 1
+
+        # model-1 count should still be 1
+        assert self._get_labeled_counter_value(
+            middleware._requests_total, model="model-1", status="success"
+        ) == 1
+
+    @pytest.mark.asyncio
+    async def test_error_status_label_on_failure(self) -> None:
+        """Error requests tagged with status=error."""
+        from prometheus_client import CollectorRegistry
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error")
+
+        mock = FailingProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry, track_labels=True)
+
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        # Should have error status
+        count = self._get_labeled_counter_value(
+            middleware._requests_total, model="unknown", status="error"
+        )
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_errors_total_with_model_label(self) -> None:
+        """errors_total includes model label when track_labels enabled."""
+        from prometheus_client import CollectorRegistry
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error")
+
+        mock = FailingProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry, track_labels=True)
+
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        # Should have error_type and model labels
+        count = self._get_labeled_counter_value(
+            middleware._errors_total, error_type="ProviderError", model="unknown"
+        )
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_histograms_with_model_labels(self) -> None:
+        """Histograms use model labels when enabled."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry, track_labels=True)
+
+        request = AgentRequest(prompt="test")
+        response = await middleware.send_request(request)
+
+        # Duration histogram should have model label
+        count = self._get_labeled_histogram_count(
+            middleware._request_duration_seconds, model=response.model
+        )
+        assert count == 1
+
+        # Token histograms should have model label
+        assert self._get_labeled_histogram_count(
+            middleware._input_tokens, model=response.model
+        ) == 1
+        assert self._get_labeled_histogram_count(
+            middleware._output_tokens, model=response.model
+        ) == 1
+
+    @pytest.mark.asyncio
+    async def test_stream_with_labels(self) -> None:
+        """Streaming requests use labels from final chunk metadata."""
+        from prometheus_client import CollectorRegistry
+
+        class LabeledStreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="chunk1", is_final=False)
+                yield StreamChunk(
+                    delta="chunk2",
+                    is_final=True,
+                    metadata={
+                        "model": "stream-model",
+                        "input_tokens": 50,
+                        "output_tokens": 100,
+                    },
+                )
+
+        mock = LabeledStreamProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry, track_labels=True)
+
+        request = AgentRequest(prompt="test")
+
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        # Should use model from final chunk
+        count = self._get_labeled_counter_value(
+            middleware._requests_total, model="stream-model", status="success"
+        )
+        assert count == 1
+
+        # Histograms should use model label
+        assert self._get_labeled_histogram_count(
+            middleware._input_tokens, model="stream-model"
+        ) == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_when_not_available(self) -> None:
+        """Model defaults to 'unknown' when not available."""
+        from prometheus_client import CollectorRegistry
+
+        class NoModelProvider(MockProvider):
+            async def send_request(self, request):
+                from mada_modelkit._types import AgentResponse
+
+                return AgentResponse(
+                    content="test",
+                    model=None,  # No model
+                    input_tokens=10,
+                    output_tokens=20,
+                )
+
+        mock = NoModelProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry, track_labels=True)
+
+        request = AgentRequest(prompt="test")
+        await middleware.send_request(request)
+
+        # Should use "unknown" for model
+        count = self._get_labeled_counter_value(
+            middleware._requests_total, model="unknown", status="success"
+        )
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_labels_disabled_uses_unlabeled_metrics(self) -> None:
+        """track_labels=False uses metrics without labels."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry, track_labels=False)
+
+        request = AgentRequest(prompt="test")
+        await middleware.send_request(request)
+
+        # Should use unlabeled counter
+        assert middleware._requests_total._value.get() == 1
+
+    @pytest.mark.asyncio
+    async def test_mixed_success_and_error_status(self) -> None:
+        """Success and error requests tracked separately by status."""
+        from prometheus_client import CollectorRegistry
+        from mada_modelkit._errors import ProviderError
+
+        class SometimesFailingProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.fail_next = False
+
+            async def send_request(self, request):
+                if self.fail_next:
+                    self.fail_next = False
+                    raise ProviderError("Intentional failure")
+                self.fail_next = True
+                return await super().send_request(request)
+
+        mock = SometimesFailingProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry, track_labels=True)
+
+        request = AgentRequest(prompt="test")
+
+        # Call 1: success
+        response = await middleware.send_request(request)
+        assert self._get_labeled_counter_value(
+            middleware._requests_total, model=response.model, status="success"
+        ) == 1
+
+        # Call 2: error
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+        assert self._get_labeled_counter_value(
+            middleware._requests_total, model="unknown", status="error"
+        ) == 1
+
+        # Call 3: success again
+        await middleware.send_request(request)
+        assert self._get_labeled_counter_value(
+            middleware._requests_total, model=response.model, status="success"
+        ) == 2

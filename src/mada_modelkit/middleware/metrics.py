@@ -26,6 +26,7 @@ class MetricsMiddleware(BaseAgentClient):
         client: BaseAgentClient,
         registry: CollectorRegistry | None = None,
         prefix: str = "madakit",
+        track_labels: bool = False,
     ) -> None:
         """Initialise with a wrapped client and metrics configuration.
 
@@ -33,6 +34,7 @@ class MetricsMiddleware(BaseAgentClient):
             client: The underlying BaseAgentClient to wrap.
             registry: Optional Prometheus registry. If None, uses default registry.
             prefix: Metric name prefix (default "madakit").
+            track_labels: If True, add model and status labels to metrics (default False).
 
         Raises:
             ImportError: If prometheus_client is not installed.
@@ -40,6 +42,7 @@ class MetricsMiddleware(BaseAgentClient):
         super().__init__()
         self._client = client
         self._prefix = prefix
+        self._track_labels = track_labels
 
         # Deferred import of prometheus_client
         try:
@@ -73,18 +76,21 @@ class MetricsMiddleware(BaseAgentClient):
         """Initialize Prometheus counter metrics."""
         from prometheus_client import Counter
 
-        # Total requests counter
+        # Total requests counter with optional labels
+        counter_labelnames = ["model", "status"] if self._track_labels else []
         self._requests_total = Counter(
             name=f"{self._prefix}_requests_total",
             documentation="Total number of requests",
+            labelnames=counter_labelnames,
             registry=self._registry,
         )
 
-        # Errors by type counter
+        # Errors by type counter with optional model label
+        error_labelnames = ["error_type", "model"] if self._track_labels else ["error_type"]
         self._errors_total = Counter(
             name=f"{self._prefix}_errors_total",
             documentation="Total number of errors by type",
-            labelnames=["error_type"],
+            labelnames=error_labelnames,
             registry=self._registry,
         )
 
@@ -92,10 +98,14 @@ class MetricsMiddleware(BaseAgentClient):
         """Initialize Prometheus histogram metrics."""
         from prometheus_client import Histogram
 
+        # Histogram labelnames with optional model label
+        histogram_labelnames = ["model"] if self._track_labels else []
+
         # Request duration histogram
         self._request_duration_seconds = Histogram(
             name=f"{self._prefix}_request_duration_seconds",
             documentation="Request latency distribution in seconds",
+            labelnames=histogram_labelnames,
             registry=self._registry,
         )
 
@@ -103,6 +113,7 @@ class MetricsMiddleware(BaseAgentClient):
         self._input_tokens = Histogram(
             name=f"{self._prefix}_input_tokens",
             documentation="Input token count distribution",
+            labelnames=histogram_labelnames,
             registry=self._registry,
         )
 
@@ -110,6 +121,7 @@ class MetricsMiddleware(BaseAgentClient):
         self._output_tokens = Histogram(
             name=f"{self._prefix}_output_tokens",
             documentation="Output token count distribution",
+            labelnames=histogram_labelnames,
             registry=self._registry,
         )
 
@@ -117,6 +129,7 @@ class MetricsMiddleware(BaseAgentClient):
         self._ttft_seconds = Histogram(
             name=f"{self._prefix}_ttft_seconds",
             documentation="Time to first token in seconds",
+            labelnames=histogram_labelnames,
             registry=self._registry,
         )
 
@@ -136,9 +149,6 @@ class MetricsMiddleware(BaseAgentClient):
 
         Records request count, latency, and token usage.
         """
-        # Increment total requests counter
-        self._requests_total.inc()
-
         # Track active request
         self._active_requests.inc()
 
@@ -146,21 +156,45 @@ class MetricsMiddleware(BaseAgentClient):
         try:
             response = await self._client.send_request(request)
 
+            # Extract model for labels
+            model = response.model or "unknown"
+
+            # Increment total requests counter with labels
+            if self._track_labels:
+                self._requests_total.labels(model=model, status="success").inc()
+            else:
+                self._requests_total.inc()
+
             # Record duration
             duration_seconds = time.perf_counter() - start_time
-            self._request_duration_seconds.observe(duration_seconds)
+            if self._track_labels:
+                self._request_duration_seconds.labels(model=model).observe(duration_seconds)
+            else:
+                self._request_duration_seconds.observe(duration_seconds)
 
             # Record token counts
             if response.input_tokens is not None:
-                self._input_tokens.observe(response.input_tokens)
+                if self._track_labels:
+                    self._input_tokens.labels(model=model).observe(response.input_tokens)
+                else:
+                    self._input_tokens.observe(response.input_tokens)
             if response.output_tokens is not None:
-                self._output_tokens.observe(response.output_tokens)
+                if self._track_labels:
+                    self._output_tokens.labels(model=model).observe(response.output_tokens)
+                else:
+                    self._output_tokens.observe(response.output_tokens)
 
             return response
         except Exception as exc:
             # Increment error counter by type
             error_type = type(exc).__name__
-            self._errors_total.labels(error_type=error_type).inc()
+            if self._track_labels:
+                # Use "unknown" for model on errors
+                self._errors_total.labels(error_type=error_type, model="unknown").inc()
+                self._requests_total.labels(model="unknown", status="error").inc()
+            else:
+                self._errors_total.labels(error_type=error_type).inc()
+                self._requests_total.inc()
             raise
         finally:
             # Decrement active request count
@@ -171,9 +205,6 @@ class MetricsMiddleware(BaseAgentClient):
 
         Records request count, latency, TTFT, and token usage.
         """
-        # Increment total requests counter
-        self._requests_total.inc()
-
         # Track active request
         self._active_requests.inc()
 
@@ -186,7 +217,13 @@ class MetricsMiddleware(BaseAgentClient):
                 # Record TTFT on first chunk
                 if not first_chunk_received:
                     ttft_seconds = time.perf_counter() - start_time
-                    self._ttft_seconds.observe(ttft_seconds)
+                    # TTFT recorded without model label (not available yet)
+                    if self._track_labels:
+                        # Use unknown for TTFT since we don't have final chunk yet
+                        model = chunk.metadata.get("model", "unknown")
+                        self._ttft_seconds.labels(model=model).observe(ttft_seconds)
+                    else:
+                        self._ttft_seconds.observe(ttft_seconds)
                     first_chunk_received = True
 
                 # Track final chunk for metadata
@@ -195,23 +232,48 @@ class MetricsMiddleware(BaseAgentClient):
 
                 yield chunk
 
+            # Extract model from final chunk metadata
+            model = "unknown"
+            if final_chunk is not None:
+                model = final_chunk.metadata.get("model", "unknown")
+
+            # Increment total requests counter with labels
+            if self._track_labels:
+                self._requests_total.labels(model=model, status="success").inc()
+            else:
+                self._requests_total.inc()
+
             # Record total duration and token counts from final chunk
             duration_seconds = time.perf_counter() - start_time
-            self._request_duration_seconds.observe(duration_seconds)
+            if self._track_labels:
+                self._request_duration_seconds.labels(model=model).observe(duration_seconds)
+            else:
+                self._request_duration_seconds.observe(duration_seconds)
 
             if final_chunk is not None:
                 input_tokens = final_chunk.metadata.get("input_tokens")
                 output_tokens = final_chunk.metadata.get("output_tokens")
 
                 if input_tokens is not None:
-                    self._input_tokens.observe(input_tokens)
+                    if self._track_labels:
+                        self._input_tokens.labels(model=model).observe(input_tokens)
+                    else:
+                        self._input_tokens.observe(input_tokens)
                 if output_tokens is not None:
-                    self._output_tokens.observe(output_tokens)
+                    if self._track_labels:
+                        self._output_tokens.labels(model=model).observe(output_tokens)
+                    else:
+                        self._output_tokens.observe(output_tokens)
 
         except Exception as exc:
             # Increment error counter by type
             error_type = type(exc).__name__
-            self._errors_total.labels(error_type=error_type).inc()
+            if self._track_labels:
+                self._errors_total.labels(error_type=error_type, model="unknown").inc()
+                self._requests_total.labels(model="unknown", status="error").inc()
+            else:
+                self._errors_total.labels(error_type=error_type).inc()
+                self._requests_total.inc()
             raise
         finally:
             # Decrement active request count
