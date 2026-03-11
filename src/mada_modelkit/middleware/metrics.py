@@ -6,6 +6,7 @@ Requires prometheus_client (optional dependency).
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from mada_modelkit._base import BaseAgentClient
@@ -62,6 +63,9 @@ class MetricsMiddleware(BaseAgentClient):
         # Initialize counter metrics
         self._init_counters()
 
+        # Initialize histogram metrics
+        self._init_histograms()
+
     def _init_counters(self) -> None:
         """Initialize Prometheus counter metrics."""
         from prometheus_client import Counter
@@ -81,6 +85,38 @@ class MetricsMiddleware(BaseAgentClient):
             registry=self._registry,
         )
 
+    def _init_histograms(self) -> None:
+        """Initialize Prometheus histogram metrics."""
+        from prometheus_client import Histogram
+
+        # Request duration histogram
+        self._request_duration_seconds = Histogram(
+            name=f"{self._prefix}_request_duration_seconds",
+            documentation="Request latency distribution in seconds",
+            registry=self._registry,
+        )
+
+        # Input tokens histogram
+        self._input_tokens = Histogram(
+            name=f"{self._prefix}_input_tokens",
+            documentation="Input token count distribution",
+            registry=self._registry,
+        )
+
+        # Output tokens histogram
+        self._output_tokens = Histogram(
+            name=f"{self._prefix}_output_tokens",
+            documentation="Output token count distribution",
+            registry=self._registry,
+        )
+
+        # Time to first token histogram (for streaming)
+        self._ttft_seconds = Histogram(
+            name=f"{self._prefix}_ttft_seconds",
+            documentation="Time to first token in seconds",
+            registry=self._registry,
+        )
+
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Execute request with metrics collection.
 
@@ -89,8 +125,20 @@ class MetricsMiddleware(BaseAgentClient):
         # Increment total requests counter
         self._requests_total.inc()
 
+        start_time = time.perf_counter()
         try:
             response = await self._client.send_request(request)
+
+            # Record duration
+            duration_seconds = time.perf_counter() - start_time
+            self._request_duration_seconds.observe(duration_seconds)
+
+            # Record token counts
+            if response.input_tokens is not None:
+                self._input_tokens.observe(response.input_tokens)
+            if response.output_tokens is not None:
+                self._output_tokens.observe(response.output_tokens)
+
             return response
         except Exception as exc:
             # Increment error counter by type
@@ -106,9 +154,37 @@ class MetricsMiddleware(BaseAgentClient):
         # Increment total requests counter
         self._requests_total.inc()
 
+        start_time = time.perf_counter()
+        first_chunk_received = False
+        final_chunk = None
+
         try:
             async for chunk in self._client.send_request_stream(request):
+                # Record TTFT on first chunk
+                if not first_chunk_received:
+                    ttft_seconds = time.perf_counter() - start_time
+                    self._ttft_seconds.observe(ttft_seconds)
+                    first_chunk_received = True
+
+                # Track final chunk for metadata
+                if chunk.is_final:
+                    final_chunk = chunk
+
                 yield chunk
+
+            # Record total duration and token counts from final chunk
+            duration_seconds = time.perf_counter() - start_time
+            self._request_duration_seconds.observe(duration_seconds)
+
+            if final_chunk is not None:
+                input_tokens = final_chunk.metadata.get("input_tokens")
+                output_tokens = final_chunk.metadata.get("output_tokens")
+
+                if input_tokens is not None:
+                    self._input_tokens.observe(input_tokens)
+                if output_tokens is not None:
+                    self._output_tokens.observe(output_tokens)
+
         except Exception as exc:
             # Increment error counter by type
             error_type = type(exc).__name__

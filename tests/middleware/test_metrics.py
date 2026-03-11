@@ -352,3 +352,303 @@ class TestCounterMetrics:
 
         # Both should increment same counter
         assert middleware._requests_total._value.get() == 2
+
+
+class TestHistogramMetrics:
+    """Test histogram metrics for latency and token distributions."""
+
+    def _get_histogram_count(self, histogram) -> float:
+        """Extract count from histogram samples."""
+        samples = list(histogram.collect())[0].samples
+        count_sample = [s for s in samples if s.name.endswith('_count')][0]
+        return count_sample.value
+
+    def _get_histogram_sum(self, histogram) -> float:
+        """Extract sum from histogram samples."""
+        samples = list(histogram.collect())[0].samples
+        sum_sample = [s for s in samples if s.name.endswith('_sum')][0]
+        return sum_sample.value
+
+    @pytest.mark.asyncio
+    async def test_request_duration_tracked_for_send_request(self) -> None:
+        """send_request records duration in histogram."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Send request
+        await middleware.send_request(request)
+
+        # Duration histogram should have 1 observation
+        assert self._get_histogram_count(middleware._request_duration_seconds) == 1
+        assert self._get_histogram_sum(middleware._request_duration_seconds) > 0
+
+    @pytest.mark.asyncio
+    async def test_request_duration_tracked_for_stream(self) -> None:
+        """send_request_stream records total duration in histogram."""
+        from prometheus_client import CollectorRegistry
+
+        class StreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="chunk", is_final=True)
+
+        mock = StreamProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        # Duration histogram should have 1 observation
+        assert self._get_histogram_count(middleware._request_duration_seconds) == 1
+        assert self._get_histogram_sum(middleware._request_duration_seconds) > 0
+
+    @pytest.mark.asyncio
+    async def test_input_tokens_tracked(self) -> None:
+        """Input tokens recorded in histogram."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+        response = await middleware.send_request(request)
+
+        # Input tokens histogram should have 1 observation
+        assert self._get_histogram_count(middleware._input_tokens) == 1
+        assert self._get_histogram_sum(middleware._input_tokens) == response.input_tokens
+
+    @pytest.mark.asyncio
+    async def test_output_tokens_tracked(self) -> None:
+        """Output tokens recorded in histogram."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+        response = await middleware.send_request(request)
+
+        # Output tokens histogram should have 1 observation
+        assert self._get_histogram_count(middleware._output_tokens) == 1
+        assert self._get_histogram_sum(middleware._output_tokens) == response.output_tokens
+
+    @pytest.mark.asyncio
+    async def test_ttft_tracked_for_stream(self) -> None:
+        """TTFT (time to first token) recorded for streaming."""
+        from prometheus_client import CollectorRegistry
+
+        class StreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="first", is_final=False)
+                yield StreamChunk(delta="second", is_final=True)
+
+        mock = StreamProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        # TTFT histogram should have 1 observation
+        assert self._get_histogram_count(middleware._ttft_seconds) == 1
+        assert self._get_histogram_sum(middleware._ttft_seconds) > 0
+
+    @pytest.mark.asyncio
+    async def test_ttft_recorded_on_first_chunk_only(self) -> None:
+        """TTFT recorded only on first chunk, not subsequent chunks."""
+        from prometheus_client import CollectorRegistry
+
+        class MultiChunkProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+                import asyncio
+
+                await asyncio.sleep(0.01)
+                yield StreamChunk(delta="1", is_final=False)
+                await asyncio.sleep(0.01)
+                yield StreamChunk(delta="2", is_final=False)
+                await asyncio.sleep(0.01)
+                yield StreamChunk(delta="3", is_final=True)
+
+        mock = MultiChunkProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        # Only 1 TTFT observation despite 3 chunks
+        assert self._get_histogram_count(middleware._ttft_seconds) == 1
+
+    @pytest.mark.asyncio
+    async def test_stream_tokens_from_final_chunk_metadata(self) -> None:
+        """Stream token counts extracted from final chunk metadata."""
+        from prometheus_client import CollectorRegistry
+
+        class MetadataStreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="chunk1", is_final=False)
+                yield StreamChunk(
+                    delta="chunk2",
+                    is_final=True,
+                    metadata={"input_tokens": 50, "output_tokens": 100},
+                )
+
+        mock = MetadataStreamProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        # Token histograms should have metadata values
+        assert self._get_histogram_count(middleware._input_tokens) == 1
+        assert self._get_histogram_sum(middleware._input_tokens) == 50
+        assert self._get_histogram_count(middleware._output_tokens) == 1
+        assert self._get_histogram_sum(middleware._output_tokens) == 100
+
+    @pytest.mark.asyncio
+    async def test_multiple_requests_accumulate_histogram_data(self) -> None:
+        """Multiple requests accumulate observations in histograms."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Send 3 requests
+        await middleware.send_request(request)
+        await middleware.send_request(request)
+        await middleware.send_request(request)
+
+        # Duration histogram should have 3 observations
+        assert self._get_histogram_count(middleware._request_duration_seconds) == 3
+
+        # Token histograms should have 3 observations each
+        assert self._get_histogram_count(middleware._input_tokens) == 3
+        assert self._get_histogram_count(middleware._output_tokens) == 3
+
+    @pytest.mark.asyncio
+    async def test_errors_dont_record_histogram_metrics(self) -> None:
+        """Failed requests don't record histogram metrics."""
+        from prometheus_client import CollectorRegistry
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error")
+
+        mock = FailingProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        # No histogram observations should be recorded
+        assert self._get_histogram_count(middleware._request_duration_seconds) == 0
+        assert self._get_histogram_count(middleware._input_tokens) == 0
+        assert self._get_histogram_count(middleware._output_tokens) == 0
+
+    @pytest.mark.asyncio
+    async def test_none_token_values_skipped(self) -> None:
+        """None token values don't record histogram observations."""
+        from prometheus_client import CollectorRegistry
+
+        class NoTokensProvider(MockProvider):
+            async def send_request(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import AgentResponse
+
+                return AgentResponse(
+                    content="test",
+                    model="mock",
+                    input_tokens=None,
+                    output_tokens=None,
+                )
+
+        mock = NoTokensProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+        await middleware.send_request(request)
+
+        # Duration should be recorded
+        assert self._get_histogram_count(middleware._request_duration_seconds) == 1
+
+        # But token histograms should have no observations
+        assert self._get_histogram_count(middleware._input_tokens) == 0
+        assert self._get_histogram_count(middleware._output_tokens) == 0
+
+    @pytest.mark.asyncio
+    async def test_histogram_sum_increases_with_observations(self) -> None:
+        """Histogram sum accumulates across multiple observations."""
+        from prometheus_client import CollectorRegistry
+
+        class CustomTokenProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.call_count = 0
+
+            async def send_request(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import AgentResponse
+
+                # Return different token counts for each call
+                return AgentResponse(
+                    content="test",
+                    model="mock",
+                    input_tokens=10 * self.call_count,
+                    output_tokens=20 * self.call_count,
+                )
+
+        mock = CustomTokenProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # First request: 10 input, 20 output
+        await middleware.send_request(request)
+        assert self._get_histogram_sum(middleware._input_tokens) == 10
+        assert self._get_histogram_sum(middleware._output_tokens) == 20
+
+        # Second request: 20 input, 40 output
+        await middleware.send_request(request)
+        assert self._get_histogram_sum(middleware._input_tokens) == 30  # 10 + 20
+        assert self._get_histogram_sum(middleware._output_tokens) == 60  # 20 + 40
+
+        # Third request: 30 input, 60 output
+        await middleware.send_request(request)
+        assert self._get_histogram_sum(middleware._input_tokens) == 60  # 10 + 20 + 30
+        assert self._get_histogram_sum(middleware._output_tokens) == 120  # 20 + 40 + 60
