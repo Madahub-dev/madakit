@@ -3,10 +3,48 @@ name = "mada-modelkit"
 version = "0.1.0"
 description = "Composable AI client library — cloud, local, and native providers behind one interface"
 requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Akil Abderrahim"},
+]
+keywords = ["llm", "ai", "agents", "providers", "middleware"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4", "mypy>=1.10"]
+# Cloud providers (all use httpx via _http_base)
+openai = ["httpx>=0.27"]
+anthropic = ["httpx>=0.27"]
+gemini = ["httpx>=0.27"]
+deepseek = ["httpx>=0.27"]
+cloud = ["httpx>=0.27"]
+# Local server providers (use httpx via _http_base)
+ollama = ["httpx>=0.27"]
+vllm = ["httpx>=0.27"]
+localai = ["httpx>=0.27"]
+local = ["httpx>=0.27"]
+# Native providers (in-process inference)
+llamacpp = ["llama-cpp-python>=0.2"]
+transformers = ["transformers>=4.40", "torch>=2.0"]
+native = ["llama-cpp-python>=0.2", "transformers>=4.40", "torch>=2.0"]
+# Observability (optional)
+metrics = ["prometheus-client>=0.20"]
+# Everything
+all = ["httpx>=0.27", "llama-cpp-python>=0.2", "transformers>=4.40", "torch>=2.0", "prometheus-client>=0.20"]
+
+[project.urls]
+Homepage = "https://madahub.org"
+Repository = "https://github.com/madahub/mada-modelkit"
 
 [build-system]
 requires = ["setuptools>=68.0"]
