@@ -430,3 +430,293 @@ class TestSendRequestStreamWithTimeout:
         with pytest.raises(asyncio.TimeoutError):
             async for _ in middleware.send_request_stream(request):
                 pass
+
+
+class TestTimeoutComprehensive:
+    """Comprehensive integration tests for TimeoutMiddleware."""
+
+    @pytest.mark.asyncio
+    async def test_mixed_request_types_both_enforced(self) -> None:
+        """Both send_request and send_request_stream respect timeout."""
+        import asyncio
+
+        class SlowProvider(MockProvider):
+            async def send_request(self, request):
+                await asyncio.sleep(0.3)
+                return await super().send_request(request)
+
+            async def send_request_stream(self, request):
+                await asyncio.sleep(0.3)
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="test", is_final=True)
+
+        mock = SlowProvider()
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=0.1)
+
+        request = AgentRequest(prompt="test")
+
+        # send_request times out
+        with pytest.raises(asyncio.TimeoutError):
+            await middleware.send_request(request)
+
+        # send_request_stream times out
+        with pytest.raises(asyncio.TimeoutError):
+            async for _ in middleware.send_request_stream(request):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_middleware_composition_with_retry(self) -> None:
+        """TimeoutMiddleware stacks with RetryMiddleware."""
+        import asyncio
+        from mada_modelkit.middleware.retry import RetryMiddleware
+        from mada_modelkit._errors import ProviderError
+
+        class FlakeyProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.attempt = 0
+
+            async def send_request(self, request):
+                self.attempt += 1
+                if self.attempt == 1:
+                    raise ProviderError("Transient error", status_code=500)
+                return await super().send_request(request)
+
+        mock = FlakeyProvider()
+        retry_mw = RetryMiddleware(client=mock, max_retries=2, backoff_base=0.01)
+        timeout_mw = TimeoutMiddleware(client=retry_mw, timeout_seconds=1.0)
+
+        request = AgentRequest(prompt="test")
+        response = await timeout_mw.send_request(request)
+
+        assert response.content == "mock"
+        assert mock.attempt == 2  # Retried once
+
+    @pytest.mark.asyncio
+    async def test_middleware_composition_with_cost_control(self) -> None:
+        """TimeoutMiddleware stacks with CostControlMiddleware."""
+        import asyncio
+        from mada_modelkit.middleware.cost_control import CostControlMiddleware
+
+        mock = MockProvider()
+        cost_fn = lambda resp: 1.5
+        cost_mw = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+        timeout_mw = TimeoutMiddleware(client=cost_mw, timeout_seconds=1.0)
+
+        request = AgentRequest(prompt="test")
+        response = await timeout_mw.send_request(request)
+
+        assert response.content == "mock"
+        assert cost_mw.total_spend == 1.5
+
+    @pytest.mark.asyncio
+    async def test_timeout_wraps_cost_control_slow_request(self) -> None:
+        """Timeout prevents slow request from incurring cost."""
+        import asyncio
+        from mada_modelkit.middleware.cost_control import CostControlMiddleware
+
+        mock = MockProvider(latency=0.5)
+        cost_fn = lambda resp: 10.0
+        cost_mw = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+        timeout_mw = TimeoutMiddleware(client=cost_mw, timeout_seconds=0.1)
+
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(asyncio.TimeoutError):
+            await timeout_mw.send_request(request)
+
+        # No cost incurred because request timed out before completion
+        assert cost_mw.total_spend == 0.0
+
+    @pytest.mark.asyncio
+    async def test_context_manager_support(self) -> None:
+        """TimeoutMiddleware works as async context manager."""
+        mock = MockProvider()
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=1.0)
+
+        request = AgentRequest(prompt="test")
+
+        async with middleware:
+            response = await middleware.send_request(request)
+
+        assert response.content == "mock"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_independent_timeouts(self) -> None:
+        """Concurrent requests have independent timeout enforcement."""
+        import asyncio
+
+        class VariableDelayProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.delays = [0.0, 0.3, 0.0]  # Second request is slow
+                self.index = 0
+
+            async def send_request(self, request):
+                delay = self.delays[self.index]
+                self.index += 1
+                await asyncio.sleep(delay)
+                return await super().send_request(request)
+
+        mock = VariableDelayProvider()
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=0.1)
+
+        request = AgentRequest(prompt="test")
+
+        # Run 3 concurrent requests
+        results = await asyncio.gather(
+            middleware.send_request(request),
+            middleware.send_request(request),
+            middleware.send_request(request),
+            return_exceptions=True,
+        )
+
+        # First and third succeed, second times out
+        assert isinstance(results[0], AgentResponse)
+        assert isinstance(results[1], asyncio.TimeoutError)
+        assert isinstance(results[2], AgentResponse)
+
+    @pytest.mark.asyncio
+    async def test_timeout_doesnt_swallow_other_exceptions(self) -> None:
+        """Timeout middleware doesn't hide non-timeout exceptions."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error", status_code=500)
+
+        mock = FailingProvider()
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=1.0)
+
+        request = AgentRequest(prompt="test")
+
+        # ProviderError propagates, not TimeoutError
+        with pytest.raises(ProviderError, match="API error"):
+            await middleware.send_request(request)
+
+    @pytest.mark.asyncio
+    async def test_long_timeout_for_expensive_operations(self) -> None:
+        """Long timeouts work for expensive operations."""
+        import asyncio
+
+        # Simulate expensive operation (0.5s)
+        mock = MockProvider(latency=0.5)
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=10.0)
+
+        request = AgentRequest(prompt="test")
+
+        # Should succeed with long timeout
+        response = await middleware.send_request(request)
+        assert response.content == "mock"
+
+    @pytest.mark.asyncio
+    async def test_zero_timeout_immediately_fails(self) -> None:
+        """Zero or very small timeout causes immediate failure."""
+        import asyncio
+
+        mock = MockProvider()
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=0.0)
+
+        request = AgentRequest(prompt="test")
+
+        # Zero timeout should fail immediately
+        with pytest.raises(asyncio.TimeoutError):
+            await middleware.send_request(request)
+
+    @pytest.mark.asyncio
+    async def test_stream_timeout_with_metadata_in_final_chunk(self) -> None:
+        """Stream timeout works when final chunk has metadata."""
+
+        class MetadataStreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="Hello", is_final=False)
+                yield StreamChunk(delta=" world", is_final=False)
+                yield StreamChunk(
+                    delta="!",
+                    is_final=True,
+                    metadata={"model": "test-model", "input_tokens": 10, "output_tokens": 20},
+                )
+
+        mock = MetadataStreamProvider()
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=1.0)
+
+        request = AgentRequest(prompt="test")
+        chunks = []
+        async for chunk in middleware.send_request_stream(request):
+            chunks.append(chunk)
+
+        assert len(chunks) == 3
+        assert chunks[2].is_final is True
+        assert chunks[2].metadata["model"] == "test-model"
+        assert chunks[2].metadata["input_tokens"] == 10
+
+    @pytest.mark.asyncio
+    async def test_timeout_preserves_response_metadata(self) -> None:
+        """Timeout middleware preserves response metadata."""
+        custom_response = AgentResponse(
+            content="test",
+            model="test-model",
+            input_tokens=50,
+            output_tokens=100,
+            metadata={"custom_key": "custom_value"},
+        )
+        mock = MockProvider(responses=[custom_response])
+        middleware = TimeoutMiddleware(client=mock, timeout_seconds=1.0)
+
+        request = AgentRequest(prompt="test")
+        response = await middleware.send_request(request)
+
+        assert response.metadata["custom_key"] == "custom_value"
+        assert response.model == "test-model"
+        assert response.input_tokens == 50
+
+    @pytest.mark.asyncio
+    async def test_multiple_middleware_layers_with_timeouts(self) -> None:
+        """Multiple TimeoutMiddleware layers work correctly."""
+        import asyncio
+
+        mock = MockProvider(latency=0.2)
+
+        # Inner timeout is longer (1.0s)
+        inner_timeout = TimeoutMiddleware(client=mock, timeout_seconds=1.0)
+
+        # Outer timeout is shorter (0.1s)
+        outer_timeout = TimeoutMiddleware(client=inner_timeout, timeout_seconds=0.1)
+
+        request = AgentRequest(prompt="test")
+
+        # Outer timeout triggers first
+        with pytest.raises(asyncio.TimeoutError):
+            await outer_timeout.send_request(request)
+
+    @pytest.mark.asyncio
+    async def test_timeout_with_streaming_and_composition(self) -> None:
+        """Timeout works correctly with streaming in middleware stack."""
+        import asyncio
+        from mada_modelkit.middleware.cost_control import CostControlMiddleware
+
+        class TokenCountingStreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="test", is_final=False)
+                yield StreamChunk(delta="", is_final=True, metadata={"input_tokens": 10, "output_tokens": 20})
+
+        mock = TokenCountingStreamProvider()
+        cost_fn = lambda resp: resp.input_tokens * 0.01 + resp.output_tokens * 0.02
+        cost_mw = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+        timeout_mw = TimeoutMiddleware(client=cost_mw, timeout_seconds=1.0)
+
+        request = AgentRequest(prompt="test")
+        chunks = []
+        async for chunk in timeout_mw.send_request_stream(request):
+            chunks.append(chunk)
+
+        assert len(chunks) == 2
+        # Cost should be tracked: 10 * 0.01 + 20 * 0.02 = 0.5
+        assert cost_mw.total_spend == 0.5
