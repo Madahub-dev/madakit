@@ -774,3 +774,320 @@ class TestBudgetReset:
 
         assert middleware.total_spend == 0.0
         assert middleware._alert_fired is False
+
+
+class TestCostControlComprehensive:
+    """Comprehensive integration tests for CostControlMiddleware."""
+
+    @pytest.mark.asyncio
+    async def test_send_request_tracks_cost(self) -> None:
+        """send_request increments spend via cost_fn."""
+        mock = MockProvider()
+        cost_fn = lambda resp: resp.input_tokens * 0.01 + resp.output_tokens * 0.02
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+
+        request = AgentRequest(prompt="test")
+        response = await middleware.send_request(request)
+
+        assert response.content == "mock"
+        # Default mock: 10 input, 5 output → 0.1 + 0.1 = 0.2
+        assert middleware.total_spend == 0.2
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_tracks_cost(self) -> None:
+        """send_request_stream increments spend from final chunk metadata."""
+
+        class TokenCountingProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="Hello", is_final=False)
+                yield StreamChunk(delta=" world", is_final=False)
+                yield StreamChunk(
+                    delta="!",
+                    is_final=True,
+                    metadata={"model": "test-model", "input_tokens": 15, "output_tokens": 25},
+                )
+
+        mock = TokenCountingProvider()
+        cost_fn = lambda resp: resp.input_tokens * 0.01 + resp.output_tokens * 0.02
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+
+        request = AgentRequest(prompt="test")
+        chunks = []
+        async for chunk in middleware.send_request_stream(request):
+            chunks.append(chunk)
+
+        assert len(chunks) == 3
+        assert chunks[0].delta == "Hello"
+        assert chunks[2].is_final is True
+        # 15 * 0.01 + 25 * 0.02 = 0.15 + 0.5 = 0.65
+        assert middleware.total_spend == 0.65
+
+    @pytest.mark.asyncio
+    async def test_send_request_enforces_budget_cap(self) -> None:
+        """send_request raises BudgetExceededError when cap reached."""
+        from mada_modelkit._errors import BudgetExceededError
+
+        mock = MockProvider()
+        cost_fn = lambda resp: 5.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn, budget_cap=12.0)
+
+        request = AgentRequest(prompt="test")
+
+        # First two succeed
+        await middleware.send_request(request)  # 5.0
+        await middleware.send_request(request)  # 10.0
+
+        assert middleware.total_spend == 10.0
+
+        # Third fails
+        with pytest.raises(BudgetExceededError, match="would exceed budget cap"):
+            await middleware.send_request(request)
+
+        # Spend unchanged after failed request
+        assert middleware.total_spend == 10.0
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_enforces_budget_cap(self) -> None:
+        """send_request_stream raises BudgetExceededError when cap reached."""
+        from mada_modelkit._errors import BudgetExceededError
+
+        class TokenCountingProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="test", is_final=False)
+                yield StreamChunk(delta="", is_final=True, metadata={"input_tokens": 10, "output_tokens": 20})
+
+        mock = TokenCountingProvider()
+        cost_fn = lambda resp: 6.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn, budget_cap=15.0)
+
+        request = AgentRequest(prompt="test")
+
+        # First two streams succeed
+        async for _ in middleware.send_request_stream(request):
+            pass
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        assert middleware.total_spend == 12.0
+
+        # Third stream fails after yielding chunks
+        with pytest.raises(BudgetExceededError):
+            async for _ in middleware.send_request_stream(request):
+                pass
+
+        # Spend unchanged
+        assert middleware.total_spend == 12.0
+
+    @pytest.mark.asyncio
+    async def test_alert_fires_via_send_request(self) -> None:
+        """Alert callback fires when threshold crossed via send_request."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 3.0
+        alerts = []
+
+        def alert_callback(current, threshold):
+            alerts.append({"current": current, "threshold": threshold})
+
+        middleware = CostControlMiddleware(
+            client=mock, cost_fn=cost_fn, budget_cap=10.0, alert_threshold=0.6, on_alert=alert_callback
+        )
+
+        request = AgentRequest(prompt="test")
+
+        # First request: 3.0, under threshold (6.0)
+        await middleware.send_request(request)
+        assert len(alerts) == 0
+
+        # Second request: 6.0, at threshold
+        await middleware.send_request(request)
+        assert len(alerts) == 1
+        assert alerts[0]["current"] == 6.0
+        assert alerts[0]["threshold"] == 6.0
+
+        # Third request: 9.0, no second alert
+        await middleware.send_request(request)
+        assert len(alerts) == 1
+
+    @pytest.mark.asyncio
+    async def test_reset_budget_via_send_request(self) -> None:
+        """reset_budget() allows new spending period via send_request."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 4.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn, budget_cap=10.0)
+
+        request = AgentRequest(prompt="test")
+
+        # First period
+        await middleware.send_request(request)  # 4.0
+        await middleware.send_request(request)  # 8.0
+        assert middleware.total_spend == 8.0
+
+        # Reset
+        middleware.reset_budget()
+        assert middleware.total_spend == 0.0
+
+        # New period
+        await middleware.send_request(request)  # 4.0
+        await middleware.send_request(request)  # 8.0
+        assert middleware.total_spend == 8.0
+
+    @pytest.mark.asyncio
+    async def test_mixed_request_types_share_budget(self) -> None:
+        """send_request and send_request_stream share same budget."""
+
+        class TokenCountingProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="test", is_final=True, metadata={"input_tokens": 10, "output_tokens": 20})
+
+        mock = TokenCountingProvider()
+        cost_fn = lambda resp: 3.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+
+        request = AgentRequest(prompt="test")
+
+        # Mix send_request and send_request_stream
+        await middleware.send_request(request)  # 3.0
+        async for _ in middleware.send_request_stream(request):
+            pass  # 6.0
+        await middleware.send_request(request)  # 9.0
+
+        assert middleware.total_spend == 9.0
+
+    @pytest.mark.asyncio
+    async def test_cost_fn_with_complex_calculation(self) -> None:
+        """Complex cost_fn calculations work correctly."""
+        mock = MockProvider()
+
+        # Tiered pricing: first 1000 tokens cheap, rest expensive
+        def tiered_cost_fn(resp):
+            total_tokens = resp.total_tokens
+            if total_tokens <= 1000:
+                return total_tokens * 0.001
+            else:
+                return 1000 * 0.001 + (total_tokens - 1000) * 0.01
+
+        middleware = CostControlMiddleware(client=mock, cost_fn=tiered_cost_fn)
+
+        # Mock returns 10 input + 5 output = 15 tokens → 0.015
+        request = AgentRequest(prompt="test")
+        await middleware.send_request(request)
+        assert middleware.total_spend == 0.015
+
+    @pytest.mark.asyncio
+    async def test_exception_propagation_from_wrapped_client(self) -> None:
+        """Exceptions from wrapped client propagate correctly."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error", status_code=500)
+
+        mock = FailingProvider()
+        cost_fn = lambda resp: 1.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError, match="API error"):
+            await middleware.send_request(request)
+
+        # No cost tracked on error
+        assert middleware.total_spend == 0.0
+
+    @pytest.mark.asyncio
+    async def test_context_manager_support(self) -> None:
+        """CostControlMiddleware works as async context manager."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 2.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+
+        request = AgentRequest(prompt="test")
+
+        async with middleware:
+            await middleware.send_request(request)
+
+        assert middleware.total_spend == 2.0
+
+    @pytest.mark.asyncio
+    async def test_middleware_composition_with_retry(self) -> None:
+        """CostControlMiddleware stacks with RetryMiddleware."""
+        from mada_modelkit.middleware.retry import RetryMiddleware
+        from mada_modelkit._errors import ProviderError
+
+        class FlakeyProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.attempt = 0
+
+            async def send_request(self, request):
+                self.attempt += 1
+                if self.attempt == 1:
+                    raise ProviderError("Transient error", status_code=500)
+                return await super().send_request(request)
+
+        mock = FlakeyProvider()
+        retry_mw = RetryMiddleware(client=mock, max_retries=2)
+        cost_fn = lambda resp: 1.5
+        cost_mw = CostControlMiddleware(client=retry_mw, cost_fn=cost_fn)
+
+        request = AgentRequest(prompt="test")
+        response = await cost_mw.send_request(request)
+
+        assert response.content == "mock"
+        # Cost tracked only once (successful response)
+        assert cost_mw.total_spend == 1.5
+        # But provider called twice (retry)
+        assert mock.attempt == 2
+
+    @pytest.mark.asyncio
+    async def test_zero_cost_requests_tracked(self) -> None:
+        """Requests with zero cost are tracked correctly."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 0.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn, budget_cap=1.0)
+
+        request = AgentRequest(prompt="test")
+
+        # Can send many zero-cost requests
+        for _ in range(100):
+            await middleware.send_request(request)
+
+        assert middleware.total_spend == 0.0
+
+    @pytest.mark.asyncio
+    async def test_negative_cost_not_allowed(self) -> None:
+        """Negative costs accumulate (may happen with credits)."""
+        mock = MockProvider()
+        cost_fn = lambda resp: -1.0  # Credits
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+
+        request = AgentRequest(prompt="test")
+        await middleware.send_request(request)
+
+        # Negative cost reduces total spend
+        assert middleware.total_spend == -1.0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_accumulate_correctly(self) -> None:
+        """Concurrent requests all contribute to total spend."""
+        import asyncio
+
+        mock = MockProvider()
+        cost_fn = lambda resp: 2.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+
+        request = AgentRequest(prompt="test")
+
+        # Send 5 requests concurrently
+        await asyncio.gather(*[middleware.send_request(request) for _ in range(5)])
+
+        assert middleware.total_spend == 10.0
