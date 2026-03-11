@@ -13,10 +13,10 @@ class TestCoreImports:
 
         assert hasattr(mada_modelkit, "__all__")
 
-    def test_all_has_20_names(self) -> None:
+    def test_all_has_21_names(self) -> None:
         from mada_modelkit import __all__
 
-        assert len(__all__) == 20
+        assert len(__all__) == 21
 
     @pytest.mark.parametrize(
         "name",
@@ -37,6 +37,7 @@ class TestCoreImports:
             "CircuitBreakerMiddleware",
             "CachingMiddleware",
             "ContentFilterMiddleware",
+            "FunctionCallingMiddleware",
             "LoadBalancingMiddleware",
             "PromptTemplateMiddleware",
             "TrackingMiddleware",
@@ -77,6 +78,7 @@ class TestCoreImports:
             CircuitBreakerMiddleware,
             CachingMiddleware,
             ContentFilterMiddleware,
+            FunctionCallingMiddleware,
             LoadBalancingMiddleware,
             PromptTemplateMiddleware,
             TrackingMiddleware,
@@ -89,6 +91,7 @@ class TestCoreImports:
             CircuitBreakerMiddleware,
             CachingMiddleware,
             ContentFilterMiddleware,
+            FunctionCallingMiddleware,
             LoadBalancingMiddleware,
             PromptTemplateMiddleware,
             TrackingMiddleware,

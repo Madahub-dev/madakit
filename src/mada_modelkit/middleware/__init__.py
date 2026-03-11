@@ -9,6 +9,7 @@ from mada_modelkit.middleware.cache import CachingMiddleware
 from mada_modelkit.middleware.circuit_breaker import CircuitBreakerMiddleware
 from mada_modelkit.middleware.content_filter import ContentFilterMiddleware
 from mada_modelkit.middleware.fallback import FallbackMiddleware
+from mada_modelkit.middleware.function_calling import FunctionCallingMiddleware
 from mada_modelkit.middleware.load_balancing import LoadBalancingMiddleware
 from mada_modelkit.middleware.prompt_template import PromptTemplateMiddleware
 from mada_modelkit.middleware.retry import RetryMiddleware
@@ -20,6 +21,7 @@ __all__ = [
     "CircuitBreakerMiddleware",
     "ContentFilterMiddleware",
     "FallbackMiddleware",
+    "FunctionCallingMiddleware",
     "LoadBalancingMiddleware",
     "PromptTemplateMiddleware",
     "RetryMiddleware",
