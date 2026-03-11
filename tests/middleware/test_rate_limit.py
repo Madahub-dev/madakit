@@ -195,7 +195,8 @@ class TestTokenBucketAlgorithm:
         middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="token_bucket")
 
         initial_tokens = middleware._tokens
-        await middleware._acquire_token()
+        request = AgentRequest(prompt="test")
+        await middleware._acquire_token(request)
 
         assert abs(middleware._tokens - (initial_tokens - 1.0)) < 0.01
 
@@ -210,7 +211,7 @@ class TestTokenBucketAlgorithm:
 
         # This should block briefly, then succeed as tokens refill
         start = time.monotonic()
-        await middleware._acquire_token()
+        await middleware._acquire_token(AgentRequest(prompt="test"))
         elapsed = time.monotonic() - start
 
         # Should have waited at least 10ms (one poll interval)
@@ -229,9 +230,9 @@ class TestTokenBucketAlgorithm:
         assert middleware._tokens == 5.0
 
         # Acquire 3 tokens
-        await middleware._acquire_token()
-        await middleware._acquire_token()
-        await middleware._acquire_token()
+        await middleware._acquire_token(AgentRequest(prompt="test"))
+        await middleware._acquire_token(AgentRequest(prompt="test"))
+        await middleware._acquire_token(AgentRequest(prompt="test"))
 
         # Should have 2 tokens left (plus any refill from elapsed time)
         assert middleware._tokens >= 2.0 and middleware._tokens < 3.0
@@ -248,7 +249,8 @@ class TestTokenBucketAlgorithm:
         assert middleware._tokens == 10.0
 
         # Acquire 10 tokens concurrently
-        await asyncio.gather(*[middleware._acquire_token() for _ in range(10)])
+        request = AgentRequest(prompt="test")
+        await asyncio.gather(*[middleware._acquire_token(request) for _ in range(10)])
 
         # All tokens consumed (plus minimal refill during execution)
         assert middleware._tokens < 1.0
@@ -264,7 +266,7 @@ class TestTokenBucketAlgorithm:
         middleware._last_refill = time.monotonic() - 0.2  # Simulate 0.2s elapsed
 
         # Should refill 2 tokens (10/sec * 0.2sec), then consume 1
-        await middleware._acquire_token()
+        await middleware._acquire_token(AgentRequest(prompt="test"))
         assert abs(middleware._tokens - 1.0) < 0.1  # ~1 token remaining
 
     def test_refill_tokens_with_custom_rate(self) -> None:
@@ -332,7 +334,7 @@ class TestLeakyBucketAlgorithm:
         assert middleware._processor_task is None
 
         # Acquire slot should start processor
-        await middleware._acquire_slot()
+        await middleware._acquire_slot(AgentRequest(prompt="test"))
 
         assert middleware._processor_task is not None
         assert not middleware._processor_task.done()
@@ -354,7 +356,7 @@ class TestLeakyBucketAlgorithm:
         assert middleware._queue.qsize() == 0
 
         # Acquire slot (waits for processing)
-        await middleware._acquire_slot()
+        await middleware._acquire_slot(AgentRequest(prompt="test"))
 
         # Queue should be empty (item was processed)
         assert middleware._queue.qsize() == 0
@@ -390,7 +392,7 @@ class TestLeakyBucketAlgorithm:
         await asyncio.sleep(0.04)
 
         # Now acquire_slot should succeed (queue has space)
-        await middleware._acquire_slot()
+        await middleware._acquire_slot(AgentRequest(prompt="test"))
 
         # Clean up
         middleware._processor_task.cancel()
@@ -441,7 +443,7 @@ class TestLeakyBucketAlgorithm:
         assert middleware._processor_task.done()
 
         # Acquire slot should restart processor
-        await middleware._acquire_slot()
+        await middleware._acquire_slot(AgentRequest(prompt="test"))
 
         assert not middleware._processor_task.done()
 
@@ -490,7 +492,8 @@ class TestLeakyBucketAlgorithm:
 
         # Acquire 5 slots concurrently (all wait for processing)
         start = time.monotonic()
-        await asyncio.gather(*[middleware._acquire_slot() for _ in range(5)])
+        request = AgentRequest(prompt="test")
+        await asyncio.gather(*[middleware._acquire_slot(request) for _ in range(5)])
         elapsed = time.monotonic() - start
 
         # Should take at least 5 intervals (5 * 1/100 = 0.05s)
@@ -905,3 +908,239 @@ class TestSendRequestStreamWithRateLimit:
         assert wait_elapsed >= 0.04
 
         assert mock.call_count == 3
+
+
+class TestPerKeyRateLimiting:
+    """Test per-key rate limiting with key_fn."""
+
+    @pytest.mark.asyncio
+    async def test_constructor_with_key_fn(self) -> None:
+        """Constructor accepts key_fn parameter."""
+        mock = MockProvider()
+        key_fn = lambda req: req.metadata.get("user_id")
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, strategy="token_bucket", key_fn=key_fn
+        )
+        assert middleware._key_fn is key_fn
+
+    @pytest.mark.asyncio
+    async def test_per_key_token_bucket_independent_limits(self) -> None:
+        """Different keys have independent token buckets."""
+        mock = MockProvider()
+        key_fn = lambda req: req.metadata.get("user_id")
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, burst_size=2, strategy="token_bucket", key_fn=key_fn
+        )
+
+        # User 1 uses up their burst
+        req_user1 = AgentRequest(prompt="test", metadata={"user_id": "user1"})
+        await middleware.send_request(req_user1)
+        await middleware.send_request(req_user1)
+
+        # User 1's bucket is depleted
+        assert middleware._per_key_tokens["user1"] < 1.0
+
+        # User 2 should still have full burst available (immediate)
+        req_user2 = AgentRequest(prompt="test", metadata={"user_id": "user2"})
+        start = time.monotonic()
+        await middleware.send_request(req_user2)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.02  # Should be immediate
+        assert middleware._per_key_tokens["user2"] >= 1.0  # Still has tokens
+        assert mock.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_per_key_leaky_bucket_independent_queues(self) -> None:
+        """Different keys have independent leaky bucket queues."""
+        mock = MockProvider()
+        key_fn = lambda req: req.metadata.get("user_id")
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=20.0, strategy="leaky_bucket", key_fn=key_fn
+        )
+
+        req_user1 = AgentRequest(prompt="test", metadata={"user_id": "user1"})
+        req_user2 = AgentRequest(prompt="test", metadata={"user_id": "user2"})
+
+        # Send 2 requests for each user concurrently
+        async def send_for_user(req):
+            await middleware.send_request(req)
+
+        start = time.monotonic()
+        await asyncio.gather(
+            send_for_user(req_user1),
+            send_for_user(req_user1),
+            send_for_user(req_user2),
+            send_for_user(req_user2),
+        )
+        elapsed = time.monotonic() - start
+
+        # Each user's requests are rate-limited independently
+        # Each user has 2 requests: first immediate, second after 1/20 = 0.05s
+        # They run in parallel, so total time ~0.05s (not 0.15s if sequential)
+        assert elapsed < 0.12  # Should be ~0.05s + overhead
+        assert mock.call_count == 4
+
+        # Clean up processors for both keys
+        for processor in middleware._per_key_processors.values():
+            if processor and not processor.done():
+                processor.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await processor
+
+    @pytest.mark.asyncio
+    async def test_per_key_creates_state_on_demand(self) -> None:
+        """Per-key state is created lazily for new keys."""
+        mock = MockProvider()
+        key_fn = lambda req: req.metadata.get("user_id")
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, strategy="token_bucket", key_fn=key_fn
+        )
+
+        # No keys initially
+        assert len(middleware._per_key_tokens) == 0
+
+        # First request for user1 creates state
+        req_user1 = AgentRequest(prompt="test", metadata={"user_id": "user1"})
+        await middleware.send_request(req_user1)
+
+        assert "user1" in middleware._per_key_tokens
+        assert "user1" in middleware._per_key_locks
+
+        # Second request for user2 creates new state
+        req_user2 = AgentRequest(prompt="test", metadata={"user_id": "user2"})
+        await middleware.send_request(req_user2)
+
+        assert "user2" in middleware._per_key_tokens
+        assert len(middleware._per_key_tokens) == 2
+
+    @pytest.mark.asyncio
+    async def test_per_key_token_bucket_enforces_rate_per_key(self) -> None:
+        """Each key's rate limit is enforced independently."""
+        mock = MockProvider()
+        key_fn = lambda req: req.metadata.get("endpoint")
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=20.0, burst_size=1, strategy="token_bucket", key_fn=key_fn
+        )
+
+        req_api1 = AgentRequest(prompt="test", metadata={"endpoint": "/api/v1"})
+
+        # Deplete api1's burst
+        await middleware.send_request(req_api1)
+        assert middleware._per_key_tokens["/api/v1"] < 1.0
+
+        # Second request for api1 should wait
+        start = time.monotonic()
+        await middleware.send_request(req_api1)
+        elapsed = time.monotonic() - start
+
+        assert elapsed >= 0.04  # Had to wait for refill
+        assert mock.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_per_key_none_key_uses_same_bucket(self) -> None:
+        """Requests with None key share the same bucket."""
+        mock = MockProvider()
+        key_fn = lambda req: req.metadata.get("user_id")  # Returns None if no metadata
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, burst_size=2, strategy="token_bucket", key_fn=key_fn
+        )
+
+        # Two requests without metadata (key=None)
+        req1 = AgentRequest(prompt="test")  # No metadata
+        req2 = AgentRequest(prompt="test")  # No metadata
+
+        # Both should share global bucket, not create per-key state
+        await middleware.send_request(req1)
+        await middleware.send_request(req2)
+
+        # Global bucket depleted
+        assert middleware._tokens < 1.0
+        # No per-key state created for None
+        assert None not in middleware._per_key_tokens
+
+    @pytest.mark.asyncio
+    async def test_per_key_stream_independent_limits(self) -> None:
+        """send_request_stream respects per-key limits."""
+        mock = MockProvider()
+        key_fn = lambda req: req.metadata.get("user_id")
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, burst_size=2, strategy="token_bucket", key_fn=key_fn
+        )
+
+        req_user1 = AgentRequest(prompt="test", metadata={"user_id": "user1"})
+        req_user2 = AgentRequest(prompt="test", metadata={"user_id": "user2"})
+
+        # User 1 depletes burst
+        async for _ in middleware.send_request_stream(req_user1):
+            pass
+        async for _ in middleware.send_request_stream(req_user1):
+            pass
+
+        # User 2 should still have full burst
+        start = time.monotonic()
+        async for _ in middleware.send_request_stream(req_user2):
+            pass
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.02  # Immediate
+        assert middleware._per_key_tokens["user2"] >= 1.0
+
+    @pytest.mark.asyncio
+    async def test_per_key_leaky_bucket_creates_processor_per_key(self) -> None:
+        """Each key gets its own processor task in leaky bucket."""
+        mock = MockProvider()
+        key_fn = lambda req: req.metadata.get("user_id")
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, strategy="leaky_bucket", key_fn=key_fn
+        )
+
+        req_user1 = AgentRequest(prompt="test", metadata={"user_id": "user1"})
+        req_user2 = AgentRequest(prompt="test", metadata={"user_id": "user2"})
+
+        # Send requests for both users
+        await middleware.send_request(req_user1)
+        await middleware.send_request(req_user2)
+
+        # Both should have their own processor tasks
+        assert "user1" in middleware._per_key_processors
+        assert "user2" in middleware._per_key_processors
+        assert middleware._per_key_processors["user1"] is not middleware._per_key_processors["user2"]
+
+        # Clean up
+        for processor in middleware._per_key_processors.values():
+            if processor and not processor.done():
+                processor.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await processor
+
+    @pytest.mark.asyncio
+    async def test_per_key_hashable_keys(self) -> None:
+        """Per-key limiting works with various hashable key types."""
+        mock = MockProvider()
+
+        # Test with string keys
+        key_fn_str = lambda req: req.metadata.get("id")
+        middleware_str = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, strategy="token_bucket", key_fn=key_fn_str
+        )
+        await middleware_str.send_request(AgentRequest(prompt="test", metadata={"id": "abc"}))
+        assert "abc" in middleware_str._per_key_tokens
+
+        # Test with int keys
+        key_fn_int = lambda req: req.metadata.get("id")
+        middleware_int = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, strategy="token_bucket", key_fn=key_fn_int
+        )
+        await middleware_int.send_request(AgentRequest(prompt="test", metadata={"id": 123}))
+        assert 123 in middleware_int._per_key_tokens
+
+        # Test with tuple keys
+        key_fn_tuple = lambda req: (req.metadata.get("user"), req.metadata.get("endpoint"))
+        middleware_tuple = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, strategy="token_bucket", key_fn=key_fn_tuple
+        )
+        await middleware_tuple.send_request(
+            AgentRequest(prompt="test", metadata={"user": "alice", "endpoint": "/api"})
+        )
+        assert ("alice", "/api") in middleware_tuple._per_key_tokens
