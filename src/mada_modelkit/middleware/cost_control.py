@@ -89,6 +89,15 @@ class CostControlMiddleware(BaseAgentClient):
         """Return the current total spend."""
         return self._total_spend
 
+    def reset_budget(self) -> None:
+        """Reset budget tracking to start a new period.
+
+        Zeroes total_spend and clears the alert_fired flag, allowing
+        alerts to fire again in the new tracking period.
+        """
+        self._total_spend = 0.0
+        self._alert_fired = False
+
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Execute request and track cost.
 

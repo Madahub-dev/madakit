@@ -618,3 +618,159 @@ class TestAlertCallbacks:
 
         assert received_current == 12.0
         assert received_threshold == 9.0
+
+
+class TestBudgetReset:
+    """Test reset_budget() method for restarting tracking periods."""
+
+    def test_reset_budget_zeroes_spend(self) -> None:
+        """reset_budget() sets total_spend back to 0.0."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 5.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        middleware._track_cost(response)
+        middleware._track_cost(response)
+
+        assert middleware.total_spend == 10.0
+
+        middleware.reset_budget()
+
+        assert middleware.total_spend == 0.0
+
+    def test_reset_budget_clears_alert_flag(self) -> None:
+        """reset_budget() clears alert_fired flag."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 6.0
+        alert_fired = [False]
+
+        def alert_callback(current, threshold):
+            alert_fired[0] = True
+
+        middleware = CostControlMiddleware(
+            client=mock, cost_fn=cost_fn, budget_cap=10.0, alert_threshold=0.5, on_alert=alert_callback
+        )
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        middleware._track_cost(response)  # 6.0, crosses 5.0 threshold
+
+        assert middleware._alert_fired is True
+        assert alert_fired[0] is True
+
+        middleware.reset_budget()
+
+        assert middleware._alert_fired is False
+
+    def test_reset_allows_alert_to_fire_again(self) -> None:
+        """After reset, alert can fire again in new period."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 6.0
+        alert_count = [0]
+
+        def alert_callback(current, threshold):
+            alert_count[0] += 1
+
+        middleware = CostControlMiddleware(
+            client=mock, cost_fn=cost_fn, budget_cap=20.0, alert_threshold=0.5, on_alert=alert_callback
+        )
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+
+        # First period - threshold is 10.0
+        middleware._track_cost(response)  # 6.0, under threshold
+        assert alert_count[0] == 0
+
+        middleware._track_cost(response)  # 12.0, crosses threshold
+        assert alert_count[0] == 1
+
+        middleware._track_cost(response)  # 18.0, no second alert
+        assert alert_count[0] == 1
+
+        # Reset and start new period
+        middleware.reset_budget()
+
+        middleware._track_cost(response)  # 6.0, under threshold
+        assert alert_count[0] == 1
+
+        middleware._track_cost(response)  # 12.0, crosses threshold again
+        assert alert_count[0] == 2
+
+    def test_reset_allows_spending_to_accumulate_again(self) -> None:
+        """After reset, spending accumulates from zero."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 3.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+
+        # First period
+        middleware._track_cost(response)
+        middleware._track_cost(response)
+        assert middleware.total_spend == 6.0
+
+        # Reset
+        middleware.reset_budget()
+        assert middleware.total_spend == 0.0
+
+        # New period
+        middleware._track_cost(response)
+        assert middleware.total_spend == 3.0
+
+        middleware._track_cost(response)
+        assert middleware.total_spend == 6.0
+
+    def test_reset_budget_is_idempotent(self) -> None:
+        """Calling reset_budget() multiple times is safe."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 5.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        middleware._track_cost(response)
+
+        # Multiple resets
+        middleware.reset_budget()
+        middleware.reset_budget()
+        middleware.reset_budget()
+
+        assert middleware.total_spend == 0.0
+        assert middleware._alert_fired is False
+
+    def test_reset_with_budget_cap(self) -> None:
+        """reset_budget() allows spending up to cap again."""
+        from mada_modelkit._errors import BudgetExceededError
+
+        mock = MockProvider()
+        cost_fn = lambda resp: 6.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn, budget_cap=10.0)
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+
+        # First period - reach cap
+        middleware._track_cost(response)  # 6.0
+
+        with pytest.raises(BudgetExceededError):
+            middleware._track_cost(response)  # Would be 12.0
+
+        # Reset
+        middleware.reset_budget()
+
+        # New period - can spend up to cap again
+        middleware._track_cost(response)  # 6.0
+        assert middleware.total_spend == 6.0
+
+        with pytest.raises(BudgetExceededError):
+            middleware._track_cost(response)  # Would be 12.0
+
+    def test_reset_on_fresh_instance(self) -> None:
+        """reset_budget() works on instance that hasn't tracked any cost."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 1.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn)
+
+        # Reset before any tracking
+        middleware.reset_budget()
+
+        assert middleware.total_spend == 0.0
+        assert middleware._alert_fired is False
