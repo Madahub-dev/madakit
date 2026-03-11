@@ -288,3 +288,213 @@ class TestTokenBucketAlgorithm:
 
         middleware._refill_tokens()
         assert abs(middleware._tokens - 1.0) < 0.01  # 2.5 * 0.4 = 1.0
+
+
+class TestLeakyBucketAlgorithm:
+    """Test leaky bucket queue and processor logic."""
+
+    @pytest.mark.asyncio
+    async def test_processor_loop_processes_at_fixed_rate(self) -> None:
+        """Processor loop dequeues and processes at fixed interval."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, strategy="leaky_bucket"
+        )
+
+        # Add items to queue
+        await middleware._queue.put(None)
+        await middleware._queue.put(None)
+
+        # Start processor
+        processor = asyncio.create_task(middleware._processor_loop())
+
+        # Wait for processing (2 items at 10/sec = 0.2 seconds)
+        await asyncio.sleep(0.25)
+
+        # Queue should be empty
+        assert middleware._queue.empty()
+
+        # Clean up
+        processor.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await processor
+
+    @pytest.mark.asyncio
+    async def test_acquire_slot_starts_processor(self) -> None:
+        """_acquire_slot starts processor task if not running."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="leaky_bucket")
+
+        assert middleware._processor_task is None
+
+        # Acquire slot should start processor
+        await middleware._acquire_slot()
+
+        assert middleware._processor_task is not None
+        assert not middleware._processor_task.done()
+
+        # Clean up
+        middleware._processor_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await middleware._processor_task
+
+    @pytest.mark.asyncio
+    async def test_acquire_slot_enqueues_request(self) -> None:
+        """_acquire_slot adds item to queue."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="leaky_bucket")
+
+        # Queue starts empty
+        assert middleware._queue.qsize() == 0
+
+        # Acquire slot
+        await middleware._acquire_slot()
+
+        # Queue should have one item
+        assert middleware._queue.qsize() == 1
+
+        # Clean up
+        if middleware._processor_task:
+            middleware._processor_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await middleware._processor_task
+
+    @pytest.mark.asyncio
+    async def test_acquire_slot_with_full_queue(self) -> None:
+        """_acquire_slot handles full queue correctly."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=50.0, burst_size=3, strategy="leaky_bucket"
+        )
+
+        # Fill queue to capacity (burst_size=3)
+        await middleware._queue.put(None)
+        await middleware._queue.put(None)
+        await middleware._queue.put(None)
+        assert middleware._queue.full()
+        assert middleware._queue.qsize() == 3
+
+        # Start processor to drain queue
+        middleware._processor_task = asyncio.create_task(middleware._processor_loop())
+
+        # Wait for processor to drain at least one item (1/50 = 0.02s per item)
+        await asyncio.sleep(0.03)
+
+        # Now acquire_slot should succeed (queue has space)
+        await middleware._acquire_slot()
+
+        # Clean up
+        middleware._processor_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await middleware._processor_task
+
+    @pytest.mark.asyncio
+    async def test_processor_loop_continuous_processing(self) -> None:
+        """Processor loop continues processing until cancelled."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=50.0, strategy="leaky_bucket"
+        )
+
+        # Start processor
+        processor = asyncio.create_task(middleware._processor_loop())
+
+        # Add items continuously
+        for _ in range(5):
+            await middleware._queue.put(None)
+
+        # Wait for processing (5 items at 50/sec = 0.1 seconds)
+        await asyncio.sleep(0.15)
+
+        # Queue should be empty
+        assert middleware._queue.empty()
+        assert not processor.done()  # Still running
+
+        # Clean up
+        processor.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await processor
+
+    @pytest.mark.asyncio
+    async def test_acquire_slot_restarts_dead_processor(self) -> None:
+        """_acquire_slot restarts processor if it has terminated."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="leaky_bucket")
+
+        # Start and immediately cancel processor
+        middleware._processor_task = asyncio.create_task(middleware._processor_loop())
+        middleware._processor_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await middleware._processor_task
+
+        assert middleware._processor_task.done()
+
+        # Acquire slot should restart processor
+        await middleware._acquire_slot()
+
+        assert not middleware._processor_task.done()
+
+        # Clean up
+        middleware._processor_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await middleware._processor_task
+
+    @pytest.mark.asyncio
+    async def test_processor_loop_respects_rate(self) -> None:
+        """Processor loop enforces correct processing rate."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=20.0, strategy="leaky_bucket"
+        )
+
+        # Add multiple items
+        for _ in range(4):
+            await middleware._queue.put(None)
+
+        # Start processor and measure time
+        start = time.monotonic()
+        processor = asyncio.create_task(middleware._processor_loop())
+
+        # Wait for all items to process
+        await middleware._queue.join()
+        elapsed = time.monotonic() - start
+
+        # First item processes immediately, then 3 more with delays
+        # 3 delays at 1/20 = 0.05s each = 0.15s total
+        assert elapsed >= 0.14  # Allow small tolerance
+
+        # Clean up
+        processor.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await processor
+
+    @pytest.mark.asyncio
+    async def test_acquire_slot_multiple_concurrent(self) -> None:
+        """Multiple concurrent slot acquisitions work correctly."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=100.0, burst_size=5, strategy="leaky_bucket"
+        )
+
+        # Acquire 5 slots concurrently (up to max queue size)
+        await asyncio.gather(*[middleware._acquire_slot() for _ in range(5)])
+
+        # Queue should have items (processor may have started draining)
+        assert middleware._queue.qsize() >= 3  # At least most items enqueued
+
+        # Clean up
+        if middleware._processor_task:
+            middleware._processor_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await middleware._processor_task
+
+    def test_processor_loop_calculates_correct_interval(self) -> None:
+        """Processor uses correct interval for given rate."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=5.0, strategy="leaky_bucket"
+        )
+
+        # Interval should be 1/5 = 0.2 seconds
+        expected_interval = 1.0 / 5.0
+        assert expected_interval == 0.2

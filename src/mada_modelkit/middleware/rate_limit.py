@@ -82,6 +82,31 @@ class RateLimitMiddleware(BaseAgentClient):  # pylint: disable=too-many-instance
             # No token available: sleep and retry
             await asyncio.sleep(0.01)  # 10ms poll interval
 
+    async def _processor_loop(self) -> None:
+        """Process queued requests at fixed rate (leaky bucket only).
+
+        Continuously dequeues items from _queue and processes them at
+        requests_per_second rate. Runs until cancelled.
+        """
+        interval = 1.0 / self._requests_per_second
+        while True:
+            await self._queue.get()
+            self._queue.task_done()
+            await asyncio.sleep(interval)
+
+    async def _acquire_slot(self) -> None:
+        """Acquire a slot in the leaky bucket queue (leaky bucket only).
+
+        Ensures the processor task is running, then enqueues a request.
+        Blocks if queue is full (raises asyncio.QueueFull if put_nowait used).
+        """
+        # Start processor if not running
+        if self._processor_task is None or self._processor_task.done():
+            self._processor_task = asyncio.create_task(self._processor_loop())
+
+        # Enqueue request (blocks if queue full)
+        await self._queue.put(None)
+
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Execute request after acquiring rate limit token/slot.
 
