@@ -495,3 +495,205 @@ class TestResponseLogging:
         # Should only have request start, no completion
         assert len(caplog.records) == 1
         assert "Request started" in caplog.text
+
+
+class TestErrorLogging:
+    """Test error logging with exceptions and stack traces."""
+
+    @pytest.mark.asyncio
+    async def test_send_request_logs_error(self, caplog) -> None:
+        """send_request logs errors with exception details."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error", status_code=500)
+
+        mock = FailingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        # Should have logged request start and error
+        assert len(caplog.records) == 2
+        assert "Request started" in caplog.text
+        assert "Request failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_error_logging_includes_request_id(self, caplog) -> None:
+        """Error log includes same request_id as request log."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error")
+
+        mock = FailingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        request_log = caplog.records[0]
+        error_log = caplog.records[1]
+
+        request_id = request_log.__dict__["request_id"]
+        assert error_log.__dict__["request_id"] == request_id
+
+    @pytest.mark.asyncio
+    async def test_error_logging_includes_exception_type(self, caplog) -> None:
+        """Error log includes exception type name."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error", status_code=500)
+
+        mock = FailingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        error_log = caplog.records[1]
+        assert error_log.__dict__["error_type"] == "ProviderError"
+
+    @pytest.mark.asyncio
+    async def test_error_logging_includes_exception_message(self, caplog) -> None:
+        """Error log includes exception message."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("Custom error message", status_code=500)
+
+        mock = FailingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        error_log = caplog.records[1]
+        assert error_log.__dict__["error_message"] == "Custom error message"
+
+    @pytest.mark.asyncio
+    async def test_error_logging_includes_duration(self, caplog) -> None:
+        """Error log includes duration until error occurred."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error")
+
+        mock = FailingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        error_log = caplog.records[1]
+        assert "duration_ms" in error_log.__dict__
+        assert error_log.__dict__["duration_ms"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_error_logging_includes_stack_trace(self, caplog) -> None:
+        """Error log includes stack trace (exc_info=True)."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error")
+
+        mock = FailingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        error_log = caplog.records[1]
+        # exc_info should be present in the log record
+        assert error_log.exc_info is not None
+
+    @pytest.mark.asyncio
+    async def test_exception_propagates_after_logging(self) -> None:
+        """Exception is re-raised after logging."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error", status_code=500)
+
+        mock = FailingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        request = AgentRequest(prompt="test")
+
+        # Exception should propagate
+        with pytest.raises(ProviderError, match="API error"):
+            await middleware.send_request(request)
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_logs_error(self, caplog) -> None:
+        """send_request_stream logs errors with exception details."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingStreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                raise ProviderError("Stream error", status_code=500)
+                yield  # Make it a generator
+
+        mock = FailingStreamProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            async for _ in middleware.send_request_stream(request):
+                pass
+
+        # Should have logged request start and error
+        assert len(caplog.records) == 2
+        assert "Request started" in caplog.text
+        assert "Request failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_error_log_level_is_error(self, caplog) -> None:
+        """Errors are logged at ERROR level."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error")
+
+        mock = FailingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        error_log = caplog.records[1]
+        assert error_log.levelno == logging.ERROR

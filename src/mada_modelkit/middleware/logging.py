@@ -91,6 +91,24 @@ class LoggingMiddleware(BaseAgentClient):
 
         self._logger.info("Request completed", extra=log_data)
 
+    def _log_error(self, request_id: str, exception: Exception, duration_ms: float) -> None:
+        """Log an error that occurred during request processing.
+
+        Args:
+            request_id: Correlation ID from the request.
+            exception: The exception that was raised.
+            duration_ms: Time elapsed before error occurred.
+        """
+        log_data = {
+            "event": "request_error",
+            "request_id": request_id,
+            "duration_ms": duration_ms,
+            "error_type": type(exception).__name__,
+            "error_message": str(exception),
+        }
+
+        self._logger.error("Request failed", extra=log_data, exc_info=True)
+
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Execute request with logging.
 
@@ -100,11 +118,15 @@ class LoggingMiddleware(BaseAgentClient):
         self._log_request_start(request_id, request)
 
         start_time = time.perf_counter()
-        response = await self._client.send_request(request)
-        duration_ms = (time.perf_counter() - start_time) * 1000.0
-
-        self._log_response_completion(request_id, response, duration_ms)
-        return response
+        try:
+            response = await self._client.send_request(request)
+            duration_ms = (time.perf_counter() - start_time) * 1000.0
+            self._log_response_completion(request_id, response, duration_ms)
+            return response
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000.0
+            self._log_error(request_id, exc, duration_ms)
+            raise
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
         """Stream response chunks with logging.
@@ -117,21 +139,26 @@ class LoggingMiddleware(BaseAgentClient):
         start_time = time.perf_counter()
         final_chunk = None
 
-        async for chunk in self._client.send_request_stream(request):
-            if chunk.is_final:
-                final_chunk = chunk
-            yield chunk
+        try:
+            async for chunk in self._client.send_request_stream(request):
+                if chunk.is_final:
+                    final_chunk = chunk
+                yield chunk
 
-        # Log completion with metadata from final chunk
-        if final_chunk is not None:
+            # Log completion with metadata from final chunk
+            if final_chunk is not None:
+                duration_ms = (time.perf_counter() - start_time) * 1000.0
+
+                # Build synthetic response from final chunk metadata
+                response = AgentResponse(
+                    content="",  # Not included in logs
+                    model=final_chunk.metadata.get("model", "unknown"),
+                    input_tokens=final_chunk.metadata.get("input_tokens", 0),
+                    output_tokens=final_chunk.metadata.get("output_tokens", 0),
+                    metadata=final_chunk.metadata,
+                )
+                self._log_response_completion(request_id, response, duration_ms)
+        except Exception as exc:
             duration_ms = (time.perf_counter() - start_time) * 1000.0
-
-            # Build synthetic response from final chunk metadata
-            response = AgentResponse(
-                content="",  # Not included in logs
-                model=final_chunk.metadata.get("model", "unknown"),
-                input_tokens=final_chunk.metadata.get("input_tokens", 0),
-                output_tokens=final_chunk.metadata.get("output_tokens", 0),
-                metadata=final_chunk.metadata,
-            )
-            self._log_response_completion(request_id, response, duration_ms)
+            self._log_error(request_id, exc, duration_ms)
+            raise
