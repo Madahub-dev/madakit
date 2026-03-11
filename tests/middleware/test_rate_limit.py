@@ -301,9 +301,11 @@ class TestLeakyBucketAlgorithm:
             client=mock, requests_per_second=10.0, strategy="leaky_bucket"
         )
 
-        # Add items to queue
-        await middleware._queue.put(None)
-        await middleware._queue.put(None)
+        # Add events to queue
+        event1 = asyncio.Event()
+        event2 = asyncio.Event()
+        await middleware._queue.put(event1)
+        await middleware._queue.put(event2)
 
         # Start processor
         processor = asyncio.create_task(middleware._processor_loop())
@@ -311,8 +313,10 @@ class TestLeakyBucketAlgorithm:
         # Wait for processing (2 items at 10/sec = 0.2 seconds)
         await asyncio.sleep(0.25)
 
-        # Queue should be empty
+        # Queue should be empty and events should be set
         assert middleware._queue.empty()
+        assert event1.is_set()
+        assert event2.is_set()
 
         # Clean up
         processor.cancel()
@@ -340,18 +344,23 @@ class TestLeakyBucketAlgorithm:
 
     @pytest.mark.asyncio
     async def test_acquire_slot_enqueues_request(self) -> None:
-        """_acquire_slot adds item to queue."""
+        """_acquire_slot enqueues and waits for processing."""
         mock = MockProvider()
-        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="leaky_bucket")
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=100.0, strategy="leaky_bucket"
+        )
 
         # Queue starts empty
         assert middleware._queue.qsize() == 0
 
-        # Acquire slot
+        # Acquire slot (waits for processing)
         await middleware._acquire_slot()
 
-        # Queue should have one item
-        assert middleware._queue.qsize() == 1
+        # Queue should be empty (item was processed)
+        assert middleware._queue.qsize() == 0
+        # But processor task should be running
+        assert middleware._processor_task is not None
+        assert not middleware._processor_task.done()
 
         # Clean up
         if middleware._processor_task:
@@ -367,10 +376,10 @@ class TestLeakyBucketAlgorithm:
             client=mock, requests_per_second=50.0, burst_size=3, strategy="leaky_bucket"
         )
 
-        # Fill queue to capacity (burst_size=3)
-        await middleware._queue.put(None)
-        await middleware._queue.put(None)
-        await middleware._queue.put(None)
+        # Fill queue to capacity (burst_size=3) with events
+        events = [asyncio.Event() for _ in range(3)]
+        for event in events:
+            await middleware._queue.put(event)
         assert middleware._queue.full()
         assert middleware._queue.qsize() == 3
 
@@ -378,7 +387,7 @@ class TestLeakyBucketAlgorithm:
         middleware._processor_task = asyncio.create_task(middleware._processor_loop())
 
         # Wait for processor to drain at least one item (1/50 = 0.02s per item)
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0.04)
 
         # Now acquire_slot should succeed (queue has space)
         await middleware._acquire_slot()
@@ -399,15 +408,17 @@ class TestLeakyBucketAlgorithm:
         # Start processor
         processor = asyncio.create_task(middleware._processor_loop())
 
-        # Add items continuously
-        for _ in range(5):
-            await middleware._queue.put(None)
+        # Add events continuously
+        events = [asyncio.Event() for _ in range(5)]
+        for event in events:
+            await middleware._queue.put(event)
 
         # Wait for processing (5 items at 50/sec = 0.1 seconds)
         await asyncio.sleep(0.15)
 
-        # Queue should be empty
+        # Queue should be empty and all events set
         assert middleware._queue.empty()
+        assert all(e.is_set() for e in events)
         assert not processor.done()  # Still running
 
         # Clean up
@@ -447,9 +458,10 @@ class TestLeakyBucketAlgorithm:
             client=mock, requests_per_second=20.0, strategy="leaky_bucket"
         )
 
-        # Add multiple items
-        for _ in range(4):
-            await middleware._queue.put(None)
+        # Add multiple events
+        events = [asyncio.Event() for _ in range(4)]
+        for event in events:
+            await middleware._queue.put(event)
 
         # Start processor and measure time
         start = time.monotonic()
@@ -459,9 +471,9 @@ class TestLeakyBucketAlgorithm:
         await middleware._queue.join()
         elapsed = time.monotonic() - start
 
-        # First item processes immediately, then 3 more with delays
-        # 3 delays at 1/20 = 0.05s each = 0.15s total
-        assert elapsed >= 0.14  # Allow small tolerance
+        # 4 items with sleep after each (4 * 1/20 = 0.2s total)
+        assert elapsed >= 0.19  # Allow small tolerance
+        assert all(e.is_set() for e in events)
 
         # Clean up
         processor.cancel()
@@ -476,11 +488,16 @@ class TestLeakyBucketAlgorithm:
             client=mock, requests_per_second=100.0, burst_size=5, strategy="leaky_bucket"
         )
 
-        # Acquire 5 slots concurrently (up to max queue size)
+        # Acquire 5 slots concurrently (all wait for processing)
+        start = time.monotonic()
         await asyncio.gather(*[middleware._acquire_slot() for _ in range(5)])
+        elapsed = time.monotonic() - start
 
-        # Queue should have items (processor may have started draining)
-        assert middleware._queue.qsize() >= 3  # At least most items enqueued
+        # Should take at least 5 intervals (5 * 1/100 = 0.05s)
+        assert elapsed >= 0.04
+
+        # Queue should be empty (all processed)
+        assert middleware._queue.qsize() == 0
 
         # Clean up
         if middleware._processor_task:
@@ -498,3 +515,187 @@ class TestLeakyBucketAlgorithm:
         # Interval should be 1/5 = 0.2 seconds
         expected_interval = 1.0 / 5.0
         assert expected_interval == 0.2
+
+
+class TestSendRequestWithRateLimit:
+    """Test send_request integration with rate limiting."""
+
+    @pytest.mark.asyncio
+    async def test_send_request_token_bucket_delegates(self) -> None:
+        """send_request with token_bucket acquires token then delegates."""
+        response_obj = AgentResponse(content="test response", model="test", input_tokens=5, output_tokens=10)
+        mock = MockProvider(responses=[response_obj])
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="token_bucket")
+
+        request = AgentRequest(prompt="test prompt")
+        response = await middleware.send_request(request)
+
+        assert response.content == "test response"
+        assert mock.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_send_request_leaky_bucket_delegates(self) -> None:
+        """send_request with leaky_bucket acquires slot then delegates."""
+        response_obj = AgentResponse(content="test response", model="test", input_tokens=5, output_tokens=10)
+        mock = MockProvider(responses=[response_obj])
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, strategy="leaky_bucket"
+        )
+
+        request = AgentRequest(prompt="test prompt")
+        response = await middleware.send_request(request)
+
+        assert response.content == "test response"
+        assert mock.call_count == 1
+
+        # Clean up processor
+        if middleware._processor_task:
+            middleware._processor_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await middleware._processor_task
+
+    @pytest.mark.asyncio
+    async def test_send_request_token_bucket_enforces_rate(self) -> None:
+        """send_request with token_bucket enforces rate limit."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=20.0, burst_size=2, strategy="token_bucket"
+        )
+
+        request = AgentRequest(prompt="test")
+
+        # First 2 requests use burst capacity (immediate)
+        start = time.monotonic()
+        await middleware.send_request(request)
+        await middleware.send_request(request)
+        immediate_elapsed = time.monotonic() - start
+        assert immediate_elapsed < 0.02  # Should be near-instant
+
+        # Third request must wait for token refill
+        start = time.monotonic()
+        await middleware.send_request(request)
+        wait_elapsed = time.monotonic() - start
+        assert wait_elapsed >= 0.04  # At least one polling interval
+
+        assert mock.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_send_request_leaky_bucket_enforces_rate(self) -> None:
+        """send_request with leaky_bucket enforces rate limit."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=20.0, strategy="leaky_bucket"
+        )
+
+        request = AgentRequest(prompt="test")
+
+        # Enqueue 3 requests
+        start = time.monotonic()
+        tasks = [middleware.send_request(request) for _ in range(3)]
+        responses = await asyncio.gather(*tasks)
+        elapsed = time.monotonic() - start
+
+        # First processes immediately, next 2 wait (2 * 1/20 = 0.1s)
+        assert elapsed >= 0.09
+        assert len(responses) == 3
+        assert mock.call_count == 3
+
+        # Clean up
+        if middleware._processor_task:
+            middleware._processor_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await middleware._processor_task
+
+    @pytest.mark.asyncio
+    async def test_send_request_token_bucket_multiple_sequential(self) -> None:
+        """Multiple sequential send_request calls with token bucket."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=50.0, burst_size=5, strategy="token_bucket"
+        )
+
+        request = AgentRequest(prompt="test")
+
+        # Send 5 requests sequentially (all use burst)
+        for i in range(5):
+            response = await middleware.send_request(request)
+            assert response.content == "mock"  # Default response
+
+        assert mock.call_count == 5
+        assert middleware._tokens < 1.0  # Burst depleted
+
+    @pytest.mark.asyncio
+    async def test_send_request_leaky_bucket_multiple_sequential(self) -> None:
+        """Multiple sequential send_request calls with leaky bucket."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=50.0, strategy="leaky_bucket"
+        )
+
+        request = AgentRequest(prompt="test")
+
+        # Send 3 requests sequentially
+        for i in range(3):
+            response = await middleware.send_request(request)
+            assert response.content == "mock"  # Default response
+
+        assert mock.call_count == 3
+
+        # Clean up
+        if middleware._processor_task:
+            middleware._processor_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await middleware._processor_task
+
+    @pytest.mark.asyncio
+    async def test_send_request_token_bucket_preserves_response(self) -> None:
+        """send_request returns exact response from wrapped client."""
+        response_obj = AgentResponse(content="content", model="model", input_tokens=10, output_tokens=20)
+        mock = MockProvider(responses=[response_obj])
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="token_bucket")
+
+        request = AgentRequest(prompt="test")
+        response = await middleware.send_request(request)
+
+        assert response.content == "content"
+        assert response.model == "model"
+        assert response.input_tokens == 10
+        assert response.output_tokens == 20
+
+    @pytest.mark.asyncio
+    async def test_send_request_propagates_exceptions(self) -> None:
+        """send_request propagates exceptions from wrapped client."""
+        from mada_modelkit._errors import ProviderError
+
+        error = ProviderError("test error", status_code=500)
+        mock = MockProvider(errors=[error])
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="token_bucket")
+
+        request = AgentRequest(prompt="test")
+        with pytest.raises(ProviderError, match="test error"):
+            await middleware.send_request(request)
+
+    @pytest.mark.asyncio
+    async def test_send_request_token_bucket_refills_between_calls(self) -> None:
+        """Tokens refill between send_request calls."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, burst_size=1, strategy="token_bucket"
+        )
+
+        request = AgentRequest(prompt="test")
+
+        # First request uses burst token
+        await middleware.send_request(request)
+        assert middleware._tokens < 1.0
+
+        # Wait for refill
+        await asyncio.sleep(0.15)  # Should refill ~1.5 tokens
+
+        # Second request should succeed without blocking
+        start = time.monotonic()
+        await middleware.send_request(request)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.02  # Should be immediate (token available)
+        assert mock.call_count == 2

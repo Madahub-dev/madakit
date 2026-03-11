@@ -51,7 +51,7 @@ class RateLimitMiddleware(BaseAgentClient):  # pylint: disable=too-many-instance
         elif strategy == "leaky_bucket":
             default_queue_size = 2 * requests_per_second
             self._max_queue_size = int(burst_size if burst_size is not None else default_queue_size)
-            self._queue: asyncio.Queue[None] = asyncio.Queue(maxsize=self._max_queue_size)
+            self._queue: asyncio.Queue[asyncio.Event] = asyncio.Queue(maxsize=self._max_queue_size)
             self._processor_task: asyncio.Task[None] | None = None
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
@@ -85,35 +85,46 @@ class RateLimitMiddleware(BaseAgentClient):  # pylint: disable=too-many-instance
     async def _processor_loop(self) -> None:
         """Process queued requests at fixed rate (leaky bucket only).
 
-        Continuously dequeues items from _queue and processes them at
-        requests_per_second rate. Runs until cancelled.
+        Continuously dequeues events from _queue, sleeps for interval,
+        then signals the event. Runs until cancelled.
         """
         interval = 1.0 / self._requests_per_second
         while True:
-            await self._queue.get()
-            self._queue.task_done()
+            event = await self._queue.get()
             await asyncio.sleep(interval)
+            event.set()
+            self._queue.task_done()
 
     async def _acquire_slot(self) -> None:
         """Acquire a slot in the leaky bucket queue (leaky bucket only).
 
-        Ensures the processor task is running, then enqueues a request.
-        Blocks if queue is full (raises asyncio.QueueFull if put_nowait used).
+        Ensures the processor task is running, enqueues an event, and waits
+        for the processor to signal the event. This enforces the rate limit.
         """
         # Start processor if not running
         if self._processor_task is None or self._processor_task.done():
             self._processor_task = asyncio.create_task(self._processor_loop())
 
-        # Enqueue request (blocks if queue full)
-        await self._queue.put(None)
+        # Create event for this request
+        event = asyncio.Event()
+
+        # Enqueue event (blocks if queue full)
+        await self._queue.put(event)
+
+        # Wait for processor to signal our turn
+        await event.wait()
 
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Execute request after acquiring rate limit token/slot.
 
-        For token_bucket: waits until a token is available.
-        For leaky_bucket: queues request and waits for processor.
+        For token_bucket: waits until a token is available, then delegates.
+        For leaky_bucket: queues request and waits for processor slot, then delegates.
         """
-        # Stub: will implement in task 8.1.4
+        if self._strategy == "token_bucket":
+            await self._acquire_token()
+        elif self._strategy == "leaky_bucket":
+            await self._acquire_slot()
+
         return await self._client.send_request(request)
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
