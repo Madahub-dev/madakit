@@ -24,6 +24,7 @@ from mada_modelkit.middleware import (
     CircuitBreakerMiddleware,
     ContentFilterMiddleware,
     FallbackMiddleware,
+    PromptTemplateMiddleware,
     RetryMiddleware,
     TrackingMiddleware,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "CircuitBreakerMiddleware",
     "CachingMiddleware",
     "ContentFilterMiddleware",
+    "PromptTemplateMiddleware",
     "TrackingMiddleware",
     "FallbackMiddleware",
 ]
