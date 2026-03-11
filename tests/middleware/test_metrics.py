@@ -652,3 +652,290 @@ class TestHistogramMetrics:
         await middleware.send_request(request)
         assert self._get_histogram_sum(middleware._input_tokens) == 60  # 10 + 20 + 30
         assert self._get_histogram_sum(middleware._output_tokens) == 120  # 20 + 40 + 60
+
+
+class TestGaugeMetrics:
+    """Test gauge metrics for active request tracking."""
+
+    def _get_gauge_value(self, gauge) -> float:
+        """Extract value from gauge samples."""
+        samples = list(gauge.collect())[0].samples
+        # Gauge has a single sample with the current value
+        return samples[0].value
+
+    @pytest.mark.asyncio
+    async def test_active_requests_increments_during_request(self) -> None:
+        """active_requests increments when request starts."""
+        from prometheus_client import CollectorRegistry
+        import asyncio
+
+        class SlowProvider(MockProvider):
+            async def send_request(self, request):
+                self.call_count += 1
+                # Simulate slow request
+                await asyncio.sleep(0.05)
+                return await super().send_request(request)
+
+        mock = SlowProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Initial value should be 0
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+        # Start request in background
+        task = asyncio.create_task(middleware.send_request(request))
+
+        # Give it time to start
+        await asyncio.sleep(0.01)
+
+        # Should be 1 while request is in flight
+        assert self._get_gauge_value(middleware._active_requests) == 1
+
+        # Wait for completion
+        await task
+
+        # Should return to 0
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+    @pytest.mark.asyncio
+    async def test_active_requests_decrements_on_completion(self) -> None:
+        """active_requests decrements when request completes."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Initial value
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+        # Send request
+        await middleware.send_request(request)
+
+        # Should return to 0 after completion
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+    @pytest.mark.asyncio
+    async def test_active_requests_decrements_on_error(self) -> None:
+        """active_requests decrements even when request fails."""
+        from prometheus_client import CollectorRegistry
+        from mada_modelkit._errors import ProviderError
+
+        class FailingProvider(MockProvider):
+            async def send_request(self, request):
+                raise ProviderError("API error")
+
+        mock = FailingProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Initial value
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+        with pytest.raises(ProviderError):
+            await middleware.send_request(request)
+
+        # Should return to 0 even after error
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+    @pytest.mark.asyncio
+    async def test_active_requests_tracks_concurrent_requests(self) -> None:
+        """active_requests tracks multiple concurrent requests."""
+        from prometheus_client import CollectorRegistry
+        import asyncio
+
+        class SlowProvider(MockProvider):
+            async def send_request(self, request):
+                self.call_count += 1
+                await asyncio.sleep(0.05)
+                return await super().send_request(request)
+
+        mock = SlowProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Start 3 concurrent requests
+        tasks = [
+            asyncio.create_task(middleware.send_request(request))
+            for _ in range(3)
+        ]
+
+        # Give them time to start
+        await asyncio.sleep(0.01)
+
+        # Should show 3 active requests
+        assert self._get_gauge_value(middleware._active_requests) == 3
+
+        # Wait for all to complete
+        await asyncio.gather(*tasks)
+
+        # Should return to 0
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+    @pytest.mark.asyncio
+    async def test_active_requests_for_stream(self) -> None:
+        """active_requests tracks streaming requests."""
+        from prometheus_client import CollectorRegistry
+
+        class StreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="chunk1", is_final=False)
+                yield StreamChunk(delta="chunk2", is_final=True)
+
+        mock = StreamProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Initial value
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+        # Consume stream
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        # Should return to 0 after stream completes
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+    @pytest.mark.asyncio
+    async def test_active_requests_stream_increments_during_streaming(self) -> None:
+        """active_requests is incremented during streaming."""
+        from prometheus_client import CollectorRegistry
+        import asyncio
+
+        class SlowStreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="chunk1", is_final=False)
+                await asyncio.sleep(0.05)
+                yield StreamChunk(delta="chunk2", is_final=True)
+
+        mock = SlowStreamProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Initial value
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+        # Start streaming
+        stream = middleware.send_request_stream(request)
+
+        # Get first chunk
+        first_chunk = await stream.__anext__()
+        assert first_chunk.delta == "chunk1"
+
+        # Should be 1 during streaming
+        assert self._get_gauge_value(middleware._active_requests) == 1
+
+        # Consume remaining chunks
+        async for _ in stream:
+            pass
+
+        # Should return to 0
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+    @pytest.mark.asyncio
+    async def test_active_requests_stream_decrements_on_error(self) -> None:
+        """active_requests decrements when stream fails."""
+        from prometheus_client import CollectorRegistry
+        from mada_modelkit._errors import ProviderError
+
+        class FailingStreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                raise ProviderError("Stream error")
+                yield  # Make it a generator
+
+        mock = FailingStreamProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        with pytest.raises(ProviderError):
+            async for _ in middleware.send_request_stream(request):
+                pass
+
+        # Should return to 0 even after error
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+    @pytest.mark.asyncio
+    async def test_mixed_request_types_share_active_gauge(self) -> None:
+        """send_request and send_request_stream share active_requests gauge."""
+        from prometheus_client import CollectorRegistry
+        import asyncio
+
+        class SlowProvider(MockProvider):
+            async def send_request(self, request):
+                await asyncio.sleep(0.05)
+                return await super().send_request(request)
+
+            async def send_request_stream(self, request):
+                from mada_modelkit._types import StreamChunk
+                await asyncio.sleep(0.05)
+                yield StreamChunk(delta="test", is_final=True)
+
+        mock = SlowProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        # Start one of each type
+        task1 = asyncio.create_task(middleware.send_request(request))
+
+        async def consume_stream():
+            async for _ in middleware.send_request_stream(request):
+                pass
+
+        task2 = asyncio.create_task(consume_stream())
+
+        # Give them time to start
+        await asyncio.sleep(0.01)
+
+        # Should show 2 active requests
+        assert self._get_gauge_value(middleware._active_requests) == 2
+
+        # Wait for completion
+        await asyncio.gather(task1, task2)
+
+        # Should return to 0
+        assert self._get_gauge_value(middleware._active_requests) == 0
+
+    @pytest.mark.asyncio
+    async def test_active_requests_sequential_requests(self) -> None:
+        """active_requests returns to 0 between sequential requests."""
+        from prometheus_client import CollectorRegistry
+
+        mock = MockProvider()
+        registry = CollectorRegistry()
+        middleware = MetricsMiddleware(client=mock, registry=registry)
+
+        request = AgentRequest(prompt="test")
+
+        for _ in range(5):
+            # Before request
+            assert self._get_gauge_value(middleware._active_requests) == 0
+
+            # Send request
+            await middleware.send_request(request)
+
+            # After request
+            assert self._get_gauge_value(middleware._active_requests) == 0

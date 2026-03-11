@@ -66,6 +66,9 @@ class MetricsMiddleware(BaseAgentClient):
         # Initialize histogram metrics
         self._init_histograms()
 
+        # Initialize gauge metrics
+        self._init_gauges()
+
     def _init_counters(self) -> None:
         """Initialize Prometheus counter metrics."""
         from prometheus_client import Counter
@@ -117,6 +120,17 @@ class MetricsMiddleware(BaseAgentClient):
             registry=self._registry,
         )
 
+    def _init_gauges(self) -> None:
+        """Initialize Prometheus gauge metrics."""
+        from prometheus_client import Gauge
+
+        # Active requests gauge
+        self._active_requests = Gauge(
+            name=f"{self._prefix}_active_requests",
+            documentation="Current number of in-flight requests",
+            registry=self._registry,
+        )
+
     async def send_request(self, request: AgentRequest) -> AgentResponse:
         """Execute request with metrics collection.
 
@@ -124,6 +138,9 @@ class MetricsMiddleware(BaseAgentClient):
         """
         # Increment total requests counter
         self._requests_total.inc()
+
+        # Track active request
+        self._active_requests.inc()
 
         start_time = time.perf_counter()
         try:
@@ -145,6 +162,9 @@ class MetricsMiddleware(BaseAgentClient):
             error_type = type(exc).__name__
             self._errors_total.labels(error_type=error_type).inc()
             raise
+        finally:
+            # Decrement active request count
+            self._active_requests.dec()
 
     async def send_request_stream(self, request: AgentRequest) -> AsyncIterator[StreamChunk]:
         """Stream response chunks with metrics collection.
@@ -153,6 +173,9 @@ class MetricsMiddleware(BaseAgentClient):
         """
         # Increment total requests counter
         self._requests_total.inc()
+
+        # Track active request
+        self._active_requests.inc()
 
         start_time = time.perf_counter()
         first_chunk_received = False
@@ -190,3 +213,6 @@ class MetricsMiddleware(BaseAgentClient):
             error_type = type(exc).__name__
             self._errors_total.labels(error_type=error_type).inc()
             raise
+        finally:
+            # Decrement active request count
+            self._active_requests.dec()
