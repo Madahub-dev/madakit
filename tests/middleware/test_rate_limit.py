@@ -699,3 +699,209 @@ class TestSendRequestWithRateLimit:
 
         assert elapsed < 0.02  # Should be immediate (token available)
         assert mock.call_count == 2
+
+
+class TestSendRequestStreamWithRateLimit:
+    """Test send_request_stream integration with rate limiting."""
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_token_bucket_delegates(self) -> None:
+        """send_request_stream with token_bucket acquires token then streams."""
+        from mada_modelkit._types import StreamChunk
+
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="token_bucket")
+
+        request = AgentRequest(prompt="test prompt")
+        chunks = []
+        async for chunk in middleware.send_request_stream(request):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert chunks[0].delta == "mock"
+        assert chunks[0].is_final is True
+        assert mock.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_leaky_bucket_delegates(self) -> None:
+        """send_request_stream with leaky_bucket acquires slot then streams."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, strategy="leaky_bucket"
+        )
+
+        request = AgentRequest(prompt="test prompt")
+        chunks = []
+        async for chunk in middleware.send_request_stream(request):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert chunks[0].delta == "mock"
+        assert mock.call_count == 1
+
+        # Clean up
+        if middleware._processor_task:
+            middleware._processor_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await middleware._processor_task
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_token_bucket_enforces_rate(self) -> None:
+        """send_request_stream with token_bucket enforces rate limit."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=20.0, burst_size=2, strategy="token_bucket"
+        )
+
+        request = AgentRequest(prompt="test")
+
+        # First 2 streams use burst capacity (immediate)
+        start = time.monotonic()
+        async for _ in middleware.send_request_stream(request):
+            pass
+        async for _ in middleware.send_request_stream(request):
+            pass
+        immediate_elapsed = time.monotonic() - start
+        assert immediate_elapsed < 0.02
+
+        # Third stream must wait for token refill
+        start = time.monotonic()
+        async for _ in middleware.send_request_stream(request):
+            pass
+        wait_elapsed = time.monotonic() - start
+        assert wait_elapsed >= 0.04
+
+        assert mock.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_leaky_bucket_enforces_rate(self) -> None:
+        """send_request_stream with leaky_bucket enforces rate limit."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=20.0, strategy="leaky_bucket"
+        )
+
+        request = AgentRequest(prompt="test")
+
+        # Create 3 stream tasks
+        async def collect_stream():
+            chunks = []
+            async for chunk in middleware.send_request_stream(request):
+                chunks.append(chunk)
+            return chunks
+
+        start = time.monotonic()
+        results = await asyncio.gather(*[collect_stream() for _ in range(3)])
+        elapsed = time.monotonic() - start
+
+        # First processes immediately, next 2 wait (2 * 1/20 = 0.1s)
+        assert elapsed >= 0.09
+        assert len(results) == 3
+        assert mock.call_count == 3
+
+        # Clean up
+        if middleware._processor_task:
+            middleware._processor_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await middleware._processor_task
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_token_bucket_single_token_per_stream(self) -> None:
+        """Each stream consumes exactly one token regardless of chunk count."""
+        # Create a mock that yields multiple chunks
+        class MultiChunkProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                from mada_modelkit._types import StreamChunk
+                yield StreamChunk(delta="chunk1", is_final=False)
+                yield StreamChunk(delta="chunk2", is_final=False)
+                yield StreamChunk(delta="chunk3", is_final=True)
+
+        mock = MultiChunkProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, burst_size=3, strategy="token_bucket"
+        )
+
+        initial_tokens = middleware._tokens
+        request = AgentRequest(prompt="test")
+
+        # Consume one stream (3 chunks)
+        chunks = []
+        async for chunk in middleware.send_request_stream(request):
+            chunks.append(chunk)
+
+        assert len(chunks) == 3
+        # Should consume exactly 1 token, not 3
+        assert abs(middleware._tokens - (initial_tokens - 1.0)) < 0.01
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_propagates_exceptions(self) -> None:
+        """send_request_stream propagates exceptions from wrapped client."""
+        from mada_modelkit._errors import ProviderError
+
+        class FailingStreamProvider(MockProvider):
+            async def send_request_stream(self, request):
+                self.call_count += 1
+                raise ProviderError("stream error", status_code=500)
+                yield  # Make it a generator
+
+        mock = FailingStreamProvider()
+        middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="token_bucket")
+
+        request = AgentRequest(prompt="test")
+        with pytest.raises(ProviderError, match="stream error"):
+            async for _ in middleware.send_request_stream(request):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_token_bucket_refills_between_streams(self) -> None:
+        """Tokens refill between send_request_stream calls."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=10.0, burst_size=1, strategy="token_bucket"
+        )
+
+        request = AgentRequest(prompt="test")
+
+        # First stream uses burst token
+        async for _ in middleware.send_request_stream(request):
+            pass
+        assert middleware._tokens < 1.0
+
+        # Wait for refill
+        await asyncio.sleep(0.15)
+
+        # Second stream should succeed without blocking
+        start = time.monotonic()
+        async for _ in middleware.send_request_stream(request):
+            pass
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.02
+        assert mock.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_mixed_with_send_request(self) -> None:
+        """send_request and send_request_stream share same rate limit."""
+        mock = MockProvider()
+        middleware = RateLimitMiddleware(
+            client=mock, requests_per_second=20.0, burst_size=2, strategy="token_bucket"
+        )
+
+        request = AgentRequest(prompt="test")
+
+        # Use burst with mixed calls
+        start = time.monotonic()
+        await middleware.send_request(request)
+        async for _ in middleware.send_request_stream(request):
+            pass
+        immediate_elapsed = time.monotonic() - start
+        assert immediate_elapsed < 0.02
+
+        # Third call must wait
+        start = time.monotonic()
+        await middleware.send_request(request)
+        wait_elapsed = time.monotonic() - start
+        assert wait_elapsed >= 0.04
+
+        assert mock.call_count == 3

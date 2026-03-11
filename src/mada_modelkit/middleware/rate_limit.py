@@ -131,7 +131,12 @@ class RateLimitMiddleware(BaseAgentClient):  # pylint: disable=too-many-instance
         """Stream response chunks after acquiring rate limit token/slot.
 
         Rate limiting applies before the first chunk, same as send_request.
+        Consumes exactly one token/slot regardless of stream length.
         """
-        # Stub: will implement in task 8.1.5
+        if self._strategy == "token_bucket":
+            await self._acquire_token()
+        elif self._strategy == "leaky_bucket":
+            await self._acquire_slot()
+
         async for chunk in self._client.send_request_stream(request):
             yield chunk
