@@ -48,6 +48,43 @@ class LoggingMiddleware(BaseAgentClient):
         """Generate a unique request ID for correlation."""
         return str(uuid.uuid4())
 
+    def _get_or_generate_request_id(self, request: AgentRequest) -> str:
+        """Get existing request ID from metadata or generate a new one.
+
+        Args:
+            request: The request that may contain an existing request ID.
+
+        Returns:
+            The request ID (existing or newly generated).
+        """
+        # Check if request already has an ID in metadata
+        existing_id = request.metadata.get("request_id")
+        if existing_id:
+            return str(existing_id)
+        return self._generate_request_id()
+
+    def _propagate_request_id(self, request: AgentRequest, request_id: str) -> AgentRequest:
+        """Create a new request with request_id in metadata for propagation.
+
+        Args:
+            request: The original request.
+            request_id: The request ID to propagate.
+
+        Returns:
+            A new AgentRequest with request_id in metadata.
+        """
+        # Add request_id to metadata for downstream propagation
+        new_metadata = {**request.metadata, "request_id": request_id}
+        return AgentRequest(
+            prompt=request.prompt,
+            system_prompt=request.system_prompt,
+            attachments=request.attachments,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            stop=request.stop,
+            metadata=new_metadata,
+        )
+
     def _log_request_start(self, request_id: str, request: AgentRequest) -> None:
         """Log the start of a request with ID and metadata.
 
@@ -113,13 +150,17 @@ class LoggingMiddleware(BaseAgentClient):
         """Execute request with logging.
 
         Logs request start, completion, and any errors.
+        Propagates request_id in request metadata for downstream tracing.
         """
-        request_id = self._generate_request_id()
+        request_id = self._get_or_generate_request_id(request)
         self._log_request_start(request_id, request)
+
+        # Propagate request_id in metadata
+        request_with_id = self._propagate_request_id(request, request_id)
 
         start_time = time.perf_counter()
         try:
-            response = await self._client.send_request(request)
+            response = await self._client.send_request(request_with_id)
             duration_ms = (time.perf_counter() - start_time) * 1000.0
             self._log_response_completion(request_id, response, duration_ms)
             return response
@@ -132,15 +173,19 @@ class LoggingMiddleware(BaseAgentClient):
         """Stream response chunks with logging.
 
         Logs request start, first chunk arrival, completion, and any errors.
+        Propagates request_id in request metadata for downstream tracing.
         """
-        request_id = self._generate_request_id()
+        request_id = self._get_or_generate_request_id(request)
         self._log_request_start(request_id, request)
+
+        # Propagate request_id in metadata
+        request_with_id = self._propagate_request_id(request, request_id)
 
         start_time = time.perf_counter()
         final_chunk = None
 
         try:
-            async for chunk in self._client.send_request_stream(request):
+            async for chunk in self._client.send_request_stream(request_with_id):
                 if chunk.is_final:
                     final_chunk = chunk
                 yield chunk

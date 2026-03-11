@@ -697,3 +697,195 @@ class TestErrorLogging:
 
         error_log = caplog.records[1]
         assert error_log.levelno == logging.ERROR
+
+
+class TestCorrelationIDPropagation:
+    """Test correlation ID generation and propagation."""
+
+    @pytest.mark.asyncio
+    async def test_request_with_existing_id_uses_that_id(self, caplog) -> None:
+        """Request with existing request_id in metadata uses that ID."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        existing_id = "custom-request-id-123"
+        request = AgentRequest(prompt="test", metadata={"request_id": existing_id})
+
+        await middleware.send_request(request)
+
+        # Should use existing ID, not generate new one
+        request_log = caplog.records[0]
+        assert request_log.__dict__["request_id"] == existing_id
+
+    @pytest.mark.asyncio
+    async def test_request_without_id_generates_new_id(self, caplog) -> None:
+        """Request without request_id gets new ID generated."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        request = AgentRequest(prompt="test", metadata={})
+
+        await middleware.send_request(request)
+
+        # Should have generated new ID
+        request_log = caplog.records[0]
+        assert "request_id" in request_log.__dict__
+        assert request_log.__dict__["request_id"] is not None
+
+    @pytest.mark.asyncio
+    async def test_request_id_propagated_to_wrapped_client(self) -> None:
+        """Request ID is added to metadata when passed to wrapped client."""
+
+        class InspectingProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.received_request = None
+
+            async def send_request(self, request):
+                self.received_request = request
+                return await super().send_request(request)
+
+        mock = InspectingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        request = AgentRequest(prompt="test", metadata={})
+        await middleware.send_request(request)
+
+        # Wrapped client should receive request with request_id in metadata
+        assert mock.received_request is not None
+        assert "request_id" in mock.received_request.metadata
+
+    @pytest.mark.asyncio
+    async def test_existing_id_preserved_through_propagation(self) -> None:
+        """Existing request ID is preserved when propagated."""
+
+        class InspectingProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.received_request = None
+
+            async def send_request(self, request):
+                self.received_request = request
+                return await super().send_request(request)
+
+        mock = InspectingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        existing_id = "my-custom-id"
+        request = AgentRequest(prompt="test", metadata={"request_id": existing_id})
+        await middleware.send_request(request)
+
+        # Wrapped client should receive same ID
+        assert mock.received_request.metadata["request_id"] == existing_id
+
+    @pytest.mark.asyncio
+    async def test_propagated_request_preserves_all_fields(self) -> None:
+        """Propagated request preserves all original fields."""
+
+        class InspectingProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.received_request = None
+
+            async def send_request(self, request):
+                self.received_request = request
+                return await super().send_request(request)
+
+        mock = InspectingProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        request = AgentRequest(
+            prompt="test prompt",
+            system_prompt="test system",
+            max_tokens=512,
+            temperature=0.9,
+            stop=["STOP"],
+            metadata={"user": "alice"},
+        )
+        await middleware.send_request(request)
+
+        # All fields should be preserved
+        received = mock.received_request
+        assert received.prompt == "test prompt"
+        assert received.system_prompt == "test system"
+        assert received.max_tokens == 512
+        assert received.temperature == 0.9
+        assert received.stop == ["STOP"]
+        assert received.metadata["user"] == "alice"
+        assert "request_id" in received.metadata
+
+    @pytest.mark.asyncio
+    async def test_send_request_stream_propagates_id(self) -> None:
+        """send_request_stream also propagates request ID."""
+
+        class InspectingStreamProvider(MockProvider):
+            def __init__(self):
+                super().__init__()
+                self.received_request = None
+
+            async def send_request_stream(self, request):
+                self.received_request = request
+                from mada_modelkit._types import StreamChunk
+
+                yield StreamChunk(delta="test", is_final=True)
+
+        mock = InspectingStreamProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        existing_id = "stream-id-456"
+        request = AgentRequest(prompt="test", metadata={"request_id": existing_id})
+
+        async for _ in middleware.send_request_stream(request):
+            pass
+
+        # Wrapped client should receive request with ID
+        assert mock.received_request.metadata["request_id"] == existing_id
+
+    @pytest.mark.asyncio
+    async def test_multiple_requests_with_same_id_use_that_id(self, caplog) -> None:
+        """Multiple requests can share the same request ID."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock, log_level="INFO")
+
+        caplog.set_level(logging.INFO)
+        shared_id = "shared-id-789"
+
+        # First request
+        request1 = AgentRequest(prompt="test1", metadata={"request_id": shared_id})
+        await middleware.send_request(request1)
+
+        # Second request with same ID
+        request2 = AgentRequest(prompt="test2", metadata={"request_id": shared_id})
+        await middleware.send_request(request2)
+
+        # Both should use the shared ID
+        assert caplog.records[0].__dict__["request_id"] == shared_id
+        assert caplog.records[2].__dict__["request_id"] == shared_id
+
+    @pytest.mark.asyncio
+    async def test_get_or_generate_request_id_with_existing_id(self) -> None:
+        """_get_or_generate_request_id returns existing ID when present."""
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock)
+
+        request = AgentRequest(prompt="test", metadata={"request_id": "existing-123"})
+        request_id = middleware._get_or_generate_request_id(request)
+
+        assert request_id == "existing-123"
+
+    @pytest.mark.asyncio
+    async def test_get_or_generate_request_id_without_existing_id(self) -> None:
+        """_get_or_generate_request_id generates new ID when absent."""
+        import uuid
+
+        mock = MockProvider()
+        middleware = LoggingMiddleware(client=mock)
+
+        request = AgentRequest(prompt="test", metadata={})
+        request_id = middleware._get_or_generate_request_id(request)
+
+        # Should be a valid UUID
+        parsed = uuid.UUID(request_id)
+        assert str(parsed) == request_id
