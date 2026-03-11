@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any, AsyncIterator
 
 from mada_modelkit._base import BaseAgentClient
+from mada_modelkit._errors import BudgetExceededError
 from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
 
 __all__ = ["CostControlMiddleware"]
@@ -51,11 +52,23 @@ class CostControlMiddleware(BaseAgentClient):
         """Calculate and accumulate cost for a response.
 
         Calls cost_fn to determine cost, then adds to total_spend.
+        If budget_cap is set and would be exceeded, raises BudgetExceededError.
 
         Args:
             response: The response to calculate cost for.
+
+        Raises:
+            BudgetExceededError: If adding this cost would exceed budget_cap.
         """
         cost = self._cost_fn(response)
+
+        # Check if adding this cost would exceed the cap
+        if self._budget_cap is not None and (self._total_spend + cost) > self._budget_cap:
+            raise BudgetExceededError(
+                f"Request would exceed budget cap of {self._budget_cap:.2f} "
+                f"(current: {self._total_spend:.2f}, cost: {cost:.2f})"
+            )
+
         self._total_spend += cost
 
     @property

@@ -255,3 +255,150 @@ class TestBudgetTracking:
 
         assert middleware1.total_spend == 0.05
         assert middleware2.total_spend == 0.10
+
+
+class TestBudgetCapEnforcement:
+    """Test budget cap enforcement and BudgetExceededError."""
+
+    def test_no_cap_allows_unlimited_spend(self) -> None:
+        """Without budget_cap, spending is unlimited."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 10.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn)  # No cap
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        # Should not raise even with high costs
+        middleware._track_cost(response)
+        middleware._track_cost(response)
+        middleware._track_cost(response)
+
+        assert middleware.total_spend == 30.0
+
+    def test_cap_enforcement_raises_on_exceed(self) -> None:
+        """Exceeding budget_cap raises BudgetExceededError."""
+        from mada_modelkit._errors import BudgetExceededError
+
+        mock = MockProvider()
+        cost_fn = lambda resp: 5.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn, budget_cap=10.0)
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        middleware._track_cost(response)  # 5.0
+        middleware._track_cost(response)  # 10.0
+
+        # Third request would exceed cap
+        with pytest.raises(BudgetExceededError):
+            middleware._track_cost(response)
+
+    def test_cap_enforcement_error_message(self) -> None:
+        """BudgetExceededError includes current spend, cost, and cap."""
+        from mada_modelkit._errors import BudgetExceededError
+
+        mock = MockProvider()
+        cost_fn = lambda resp: 6.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn, budget_cap=10.0)
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        middleware._track_cost(response)  # 6.0
+
+        # Second request would exceed (6.0 + 6.0 = 12.0 > 10.0)
+        with pytest.raises(BudgetExceededError) as exc_info:
+            middleware._track_cost(response)
+
+        error_msg = str(exc_info.value)
+        assert "10.00" in error_msg  # Cap
+        assert "6.00" in error_msg    # Current or cost
+
+    def test_cap_allows_requests_up_to_limit(self) -> None:
+        """Requests are allowed as long as total stays within cap."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 2.5
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn, budget_cap=10.0)
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        # 4 requests * 2.5 = 10.0 (exactly at cap)
+        middleware._track_cost(response)
+        middleware._track_cost(response)
+        middleware._track_cost(response)
+        middleware._track_cost(response)
+
+        assert middleware.total_spend == 10.0
+
+        # Fifth would exceed
+        from mada_modelkit._errors import BudgetExceededError
+        with pytest.raises(BudgetExceededError):
+            middleware._track_cost(response)
+
+    def test_cap_enforcement_doesnt_increment_on_exceed(self) -> None:
+        """When cap is exceeded, spend is not incremented."""
+        from mada_modelkit._errors import BudgetExceededError
+
+        mock = MockProvider()
+        cost_fn = lambda resp: 8.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn, budget_cap=10.0)
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        middleware._track_cost(response)  # 8.0
+
+        try:
+            middleware._track_cost(response)  # Would be 16.0, exceeds cap
+        except BudgetExceededError:
+            pass
+
+        # Spend should still be 8.0, not 16.0
+        assert middleware.total_spend == 8.0
+
+    def test_exact_cap_match_allowed(self) -> None:
+        """Request that brings total exactly to cap is allowed."""
+        mock = MockProvider()
+        cost_fn = lambda resp: 5.0
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn, budget_cap=10.0)
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        middleware._track_cost(response)  # 5.0
+        middleware._track_cost(response)  # 10.0 (exactly at cap)
+
+        assert middleware.total_spend == 10.0
+
+    def test_fractional_cap_enforcement(self) -> None:
+        """Fractional budget caps work correctly."""
+        from mada_modelkit._errors import BudgetExceededError
+
+        mock = MockProvider()
+        cost_fn = lambda resp: 0.3
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn, budget_cap=1.0)
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        # 3 requests * 0.3 = 0.9 (under cap)
+        middleware._track_cost(response)
+        middleware._track_cost(response)
+        middleware._track_cost(response)
+
+        # Fourth would be 1.2 > 1.0
+        with pytest.raises(BudgetExceededError):
+            middleware._track_cost(response)
+
+    def test_very_small_cap(self) -> None:
+        """Very small caps (< 1) are enforced correctly."""
+        from mada_modelkit._errors import BudgetExceededError
+
+        mock = MockProvider()
+        cost_fn = lambda resp: 0.01
+        middleware = CostControlMiddleware(client=mock, cost_fn=cost_fn, budget_cap=0.05)
+
+        response = AgentResponse(content="test", model="test", input_tokens=10, output_tokens=20)
+        # 5 requests * 0.01 = 0.05 (at cap)
+        for _ in range(5):
+            middleware._track_cost(response)
+
+        assert middleware.total_spend == 0.05
+
+        # Sixth would exceed
+        with pytest.raises(BudgetExceededError):
+            middleware._track_cost(response)
+
+    def test_budget_exceeded_is_middleware_error(self) -> None:
+        """BudgetExceededError inherits from MiddlewareError."""
+        from mada_modelkit._errors import BudgetExceededError, MiddlewareError
+
+        assert issubclass(BudgetExceededError, MiddlewareError)

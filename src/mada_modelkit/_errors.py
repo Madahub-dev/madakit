@@ -36,3 +36,7 @@ class RetryExhaustedError(MiddlewareError):
         """Store the error message and the exception from the final attempt."""
         super().__init__(message)
         self.last_error = last_error
+
+
+class BudgetExceededError(MiddlewareError):
+    """Raised when a request would exceed the configured budget cap."""
