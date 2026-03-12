@@ -129,11 +129,11 @@ class TransformersClient(BaseAgentClient):
         Returns:
             An ``AgentResponse`` built from the decoded generation output.
         """
-        from transformers import StoppingCriteria, StoppingCriteriaList  # type: ignore[import-untyped]
+        from transformers import StoppingCriteria, StoppingCriteriaList
 
         self._stop_flag = False
 
-        class _CancelCriteria(StoppingCriteria):
+        class _CancelCriteria(StoppingCriteria):  # type: ignore[misc]
             """Stopping criteria that checks the client's stop flag."""
 
             def __init__(self_inner) -> None:

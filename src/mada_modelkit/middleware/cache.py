@@ -45,7 +45,7 @@ class CachingMiddleware(BaseAgentClient):
         self._ttl = ttl
         self._max_entries = max_entries
         self._key_fn = key_fn
-        self._cache: dict[str, tuple[AgentResponse, float]] = OrderedDict()
+        self._cache: OrderedDict[str, tuple[AgentResponse, float]] = OrderedDict()
         self._in_flight: dict[str, asyncio.Lock] = {}
 
     @staticmethod
@@ -86,7 +86,7 @@ class CachingMiddleware(BaseAgentClient):
         if key in self._cache:
             response, stored_at = self._cache[key]
             if time.monotonic() - stored_at < self._ttl:
-                self._cache.move_to_end(key)  # mark as most-recently-used  # type: ignore[attr-defined]
+                self._cache.move_to_end(key)  # mark as most-recently-used
                 return response
             del self._cache[key]  # TTL expired; fall through to slow path
 
@@ -98,13 +98,13 @@ class CachingMiddleware(BaseAgentClient):
             if key in self._cache:
                 response, stored_at = self._cache[key]
                 if time.monotonic() - stored_at < self._ttl:
-                    self._cache.move_to_end(key)  # type: ignore[attr-defined]
+                    self._cache.move_to_end(key)
                     return response
                 del self._cache[key]  # TTL expired
             response = await self._client.send_request(request)
             # LRU eviction: remove oldest-accessed entry if at capacity
             if len(self._cache) >= self._max_entries:
-                self._cache.popitem(last=False)  # type: ignore[attr-defined]
+                self._cache.popitem(last=False)
             self._cache[key] = (response, time.monotonic())
             return response
 
@@ -129,7 +129,7 @@ class CachingMiddleware(BaseAgentClient):
         if key in self._cache:
             response, stored_at = self._cache[key]
             if time.monotonic() - stored_at < self._ttl:
-                self._cache.move_to_end(key)  # type: ignore[attr-defined]
+                self._cache.move_to_end(key)
                 yield StreamChunk(delta=response.content, is_final=True)
                 return
             del self._cache[key]  # TTL expired; fall through to slow path
@@ -143,7 +143,7 @@ class CachingMiddleware(BaseAgentClient):
                 if chunk.is_final:
                     content = "".join(buffer)
                     if len(self._cache) >= self._max_entries:
-                        self._cache.popitem(last=False)  # type: ignore[attr-defined]
+                        self._cache.popitem(last=False)
                     self._cache[key] = (
                         AgentResponse(
                             content=content, model="", input_tokens=0, output_tokens=0

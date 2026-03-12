@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, AsyncIterator
 
 from mada_modelkit._base import BaseAgentClient
 from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
@@ -122,10 +122,11 @@ class MockProvider(BaseAgentClient):
                 await asyncio.sleep(self._latency / len(self._stream_chunks))
 
             is_final = i == len(self._stream_chunks) - 1
+            metadata_dict = {"index": i} if is_final else {}
             yield StreamChunk(
                 delta=chunk_text,
                 is_final=is_final,
-                metadata={"index": i} if is_final else None,
+                metadata=metadata_dict,
             )
 
 

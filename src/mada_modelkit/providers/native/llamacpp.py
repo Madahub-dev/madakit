@@ -91,7 +91,7 @@ class LlamaCppClient(BaseAgentClient):
         Performs the deferred import of ``llama_cpp`` so the zero-dep core
         remains importable without the optional extra installed.
         """
-        from llama_cpp import Llama  # type: ignore[import-untyped]
+        from llama_cpp import Llama
 
         return Llama(model_path=self._model_path, n_ctx=self._n_ctx)
 

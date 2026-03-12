@@ -50,7 +50,7 @@ class Tool:
         Returns:
             OpenAPI-compatible function schema.
         """
-        schema = {
+        schema: dict[str, Any] = {
             "type": "function",
             "function": {
                 "name": self.name,
