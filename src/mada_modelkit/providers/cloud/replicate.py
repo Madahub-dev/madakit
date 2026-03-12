@@ -142,7 +142,7 @@ class ReplicateClient(HttpAgentClient):
         payload["stream"] = True
 
         try:
-            async with self._client.stream(
+            async with self._client.stream(  # type: ignore[attr-defined]
                 "POST",
                 self._build_url(self._endpoint()),
                 json=payload,
