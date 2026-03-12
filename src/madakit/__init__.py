@@ -3,6 +3,8 @@
 Re-exports the public API surface: base client, types, errors, and middleware.
 """
 
+__version__ = "1.0.0"
+
 from madakit._base import BaseAgentClient
 from madakit._errors import (
     AgentError,
