@@ -9,8 +9,8 @@ import time
 
 import pytest
 
-from mada_modelkit._types import AgentRequest, AgentResponse
-from mada_modelkit.testing.utils import (
+from madakit._types import AgentRequest, AgentResponse
+from madakit.testing.utils import (
     MockProvider,
     assert_cache_hit,
     assert_cache_miss,

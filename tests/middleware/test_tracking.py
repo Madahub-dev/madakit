@@ -17,9 +17,9 @@ from unittest.mock import patch
 import pytest
 
 from helpers import MockProvider
-from mada_modelkit._base import BaseAgentClient
-from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk, TrackingStats
-from mada_modelkit.middleware.tracking import TrackingMiddleware
+from madakit._base import BaseAgentClient
+from madakit._types import AgentRequest, AgentResponse, StreamChunk, TrackingStats
+from madakit.middleware.tracking import TrackingMiddleware
 
 
 class _MultiChunkProvider(BaseAgentClient):
@@ -153,7 +153,7 @@ class TestTrackingMiddlewareConstructor:
 
     def test_client_can_be_another_middleware(self) -> None:
         """Asserts that a TrackingMiddleware can wrap another middleware (composition)."""
-        from mada_modelkit.middleware.cache import CachingMiddleware
+        from madakit.middleware.cache import CachingMiddleware
 
         inner = CachingMiddleware(client=MockProvider())
         outer = TrackingMiddleware(client=inner)
@@ -240,7 +240,7 @@ class TestSendRequest:
         """Asserts that inference_ms is derived from time.perf_counter readings."""
         side_effects = [1.0, 1.5]  # start=1.0, end=1.5 → 500 ms
         middleware = TrackingMiddleware(client=MockProvider())
-        with patch("mada_modelkit.middleware.tracking.time.perf_counter", side_effect=side_effects):
+        with patch("madakit.middleware.tracking.time.perf_counter", side_effect=side_effects):
             await middleware.send_request(AgentRequest(prompt="hi"))
         assert middleware._stats.total_inference_ms == pytest.approx(500.0)
 
@@ -249,7 +249,7 @@ class TestSendRequest:
         """Asserts that total_inference_ms sums elapsed time across multiple calls."""
         side_effects = [0.0, 0.1, 0.0, 0.2]  # 100 ms + 200 ms = 300 ms
         middleware = TrackingMiddleware(client=MockProvider())
-        with patch("mada_modelkit.middleware.tracking.time.perf_counter", side_effect=side_effects):
+        with patch("madakit.middleware.tracking.time.perf_counter", side_effect=side_effects):
             await middleware.send_request(AgentRequest(prompt="a"))
             await middleware.send_request(AgentRequest(prompt="b"))
         assert middleware._stats.total_inference_ms == pytest.approx(300.0)
@@ -333,7 +333,7 @@ class TestSendRequestStream:
         # Single-chunk stream: perf_counter called as start, ttft, elapsed (3 calls).
         side_effects = [0.0, 0.3, 0.5]
         middleware = TrackingMiddleware(client=MockProvider())
-        with patch("mada_modelkit.middleware.tracking.time.perf_counter", side_effect=side_effects):
+        with patch("madakit.middleware.tracking.time.perf_counter", side_effect=side_effects):
             chunks = [c async for c in middleware.send_request_stream(AgentRequest(prompt="hi"))]
         assert chunks[0].metadata["ttft_ms"] == pytest.approx(300.0)
 
@@ -344,7 +344,7 @@ class TestSendRequestStream:
         side_effects = [0.0, 0.1, 0.2,   # call 1: ttft = 100 ms
                         0.0, 0.3, 0.6]   # call 2: ttft = 300 ms
         middleware = TrackingMiddleware(client=MockProvider())
-        with patch("mada_modelkit.middleware.tracking.time.perf_counter", side_effect=side_effects):
+        with patch("madakit.middleware.tracking.time.perf_counter", side_effect=side_effects):
             async for _ in middleware.send_request_stream(AgentRequest(prompt="a")):
                 pass
             async for _ in middleware.send_request_stream(AgentRequest(prompt="b")):
@@ -364,7 +364,7 @@ class TestSendRequestStream:
         """Asserts that inference_ms equals elapsed time from start to the final chunk."""
         side_effects = [0.0, 0.1, 0.5]  # start=0, ttft at 0.1, elapsed at 0.5 → 500 ms
         middleware = TrackingMiddleware(client=MockProvider())
-        with patch("mada_modelkit.middleware.tracking.time.perf_counter", side_effect=side_effects):
+        with patch("madakit.middleware.tracking.time.perf_counter", side_effect=side_effects):
             async for _ in middleware.send_request_stream(AgentRequest(prompt="hi")):
                 pass
         assert middleware._stats.total_inference_ms == pytest.approx(500.0)
@@ -449,17 +449,17 @@ class TestModuleExports:
 
     def test_all_is_defined(self) -> None:
         """Asserts that __all__ is defined in the tracking module."""
-        import mada_modelkit.middleware.tracking as mod
+        import madakit.middleware.tracking as mod
         assert hasattr(mod, "__all__")
 
     def test_tracking_middleware_in_all(self) -> None:
         """Asserts that 'TrackingMiddleware' is listed in __all__."""
-        import mada_modelkit.middleware.tracking as mod
+        import madakit.middleware.tracking as mod
         assert "TrackingMiddleware" in mod.__all__
 
     def test_tracking_middleware_importable(self) -> None:
         """Asserts that TrackingMiddleware can be imported from the tracking module."""
-        from mada_modelkit.middleware.tracking import TrackingMiddleware as TM
+        from madakit.middleware.tracking import TrackingMiddleware as TM
         assert TM is TrackingMiddleware
 
 
@@ -546,7 +546,7 @@ class TestIntegration:
     @pytest.mark.asyncio
     async def test_stacked_with_caching_middleware(self) -> None:
         """Asserts that TrackingMiddleware correctly wraps CachingMiddleware."""
-        from mada_modelkit.middleware.cache import CachingMiddleware
+        from madakit.middleware.cache import CachingMiddleware
 
         inner = CachingMiddleware(client=MockProvider())
         tracking = TrackingMiddleware(client=inner)

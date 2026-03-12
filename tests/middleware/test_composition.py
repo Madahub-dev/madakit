@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from helpers import MockProvider
-from mada_modelkit import (
+from madakit import (
     AgentRequest,
     AgentResponse,
     CachingMiddleware,
@@ -14,7 +14,7 @@ from mada_modelkit import (
     RetryMiddleware,
     TrackingMiddleware,
 )
-from mada_modelkit._errors import ProviderError
+from madakit._errors import ProviderError
 
 
 def _build_stack(
@@ -103,7 +103,7 @@ class TestErrorPropagation:
         provider = MockProvider(errors=errors)
         tracking, stack = _build_stack(provider)
 
-        from mada_modelkit._errors import CircuitOpenError, RetryExhaustedError
+        from madakit._errors import CircuitOpenError, RetryExhaustedError
 
         failures = 0
         for _ in range(10):

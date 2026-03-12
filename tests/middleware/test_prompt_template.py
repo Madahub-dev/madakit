@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._errors import MiddlewareError
-from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
-from mada_modelkit.middleware.prompt_template import PromptTemplateMiddleware
+from madakit._errors import MiddlewareError
+from madakit._types import AgentRequest, AgentResponse, StreamChunk
+from madakit.middleware.prompt_template import PromptTemplateMiddleware
 
 from helpers import MockProvider
 
@@ -20,13 +20,13 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains only PromptTemplateMiddleware."""
-        from mada_modelkit.middleware import prompt_template
+        from madakit.middleware import prompt_template
 
         assert prompt_template.__all__ == ["PromptTemplateMiddleware"]
 
     def test_middleware_importable(self) -> None:
         """PromptTemplateMiddleware can be imported from module."""
-        from mada_modelkit.middleware.prompt_template import (
+        from madakit.middleware.prompt_template import (
             PromptTemplateMiddleware as PTM,
         )
 

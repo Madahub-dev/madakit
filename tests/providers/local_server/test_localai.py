@@ -18,11 +18,11 @@ import json
 import httpx
 import pytest
 
-from mada_modelkit._errors import ProviderError
-from mada_modelkit._types import AgentRequest, AgentResponse, Attachment
-from mada_modelkit.providers._http_base import HttpAgentClient
-from mada_modelkit.providers._openai_compat import OpenAICompatMixin
-from mada_modelkit.providers.local_server.localai import LocalAIClient
+from madakit._errors import ProviderError
+from madakit._types import AgentRequest, AgentResponse, Attachment
+from madakit.providers._http_base import HttpAgentClient
+from madakit.providers._openai_compat import OpenAICompatMixin
+from madakit.providers.local_server.localai import LocalAIClient
 
 
 # ---------------------------------------------------------------------------
@@ -35,13 +35,13 @@ class TestModuleExports:
 
     def test_localai_client_in_all(self) -> None:
         """LocalAIClient is listed in __all__."""
-        from mada_modelkit.providers.local_server import localai
+        from madakit.providers.local_server import localai
 
         assert "LocalAIClient" in localai.__all__
 
     def test_localai_client_importable(self) -> None:
         """LocalAIClient can be imported directly from its module."""
-        from mada_modelkit.providers.local_server.localai import LocalAIClient as LC
+        from madakit.providers.local_server.localai import LocalAIClient as LC
 
         assert LC is LocalAIClient
 

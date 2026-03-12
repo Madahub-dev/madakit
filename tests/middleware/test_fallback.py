@@ -22,10 +22,10 @@ import pytest
 from typing import AsyncIterator
 
 from helpers import MockProvider
-from mada_modelkit._base import BaseAgentClient
-from mada_modelkit._base import BaseAgentClient
-from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
-from mada_modelkit.middleware.fallback import FallbackMiddleware
+from madakit._base import BaseAgentClient
+from madakit._base import BaseAgentClient
+from madakit._types import AgentRequest, AgentResponse, StreamChunk
+from madakit.middleware.fallback import FallbackMiddleware
 
 
 class TestFallbackMiddlewareConstructor:
@@ -91,7 +91,7 @@ class TestFallbackMiddlewareConstructor:
 
     def test_primary_can_be_another_middleware(self) -> None:
         """Asserts that a middleware instance is accepted as the primary client."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         inner = RetryMiddleware(client=MockProvider())
         middleware = FallbackMiddleware(primary=inner, fallbacks=[])
@@ -99,7 +99,7 @@ class TestFallbackMiddlewareConstructor:
 
     def test_fallback_can_be_another_middleware(self) -> None:
         """Asserts that a middleware instance is accepted as a fallback client."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         fallback = RetryMiddleware(client=MockProvider())
         middleware = FallbackMiddleware(primary=MockProvider(), fallbacks=[fallback])
@@ -503,17 +503,17 @@ class TestModuleExports:
 
     def test_all_is_defined(self) -> None:
         """Asserts that __all__ is defined in the fallback module."""
-        import mada_modelkit.middleware.fallback as mod
+        import madakit.middleware.fallback as mod
         assert hasattr(mod, "__all__")
 
     def test_fallback_middleware_in_all(self) -> None:
         """Asserts that 'FallbackMiddleware' is listed in __all__."""
-        import mada_modelkit.middleware.fallback as mod
+        import madakit.middleware.fallback as mod
         assert "FallbackMiddleware" in mod.__all__
 
     def test_fallback_middleware_importable(self) -> None:
         """Asserts that FallbackMiddleware can be imported from the fallback module."""
-        from mada_modelkit.middleware.fallback import FallbackMiddleware as FM
+        from madakit.middleware.fallback import FallbackMiddleware as FM
         assert FM is FallbackMiddleware
 
 
@@ -563,7 +563,7 @@ class TestIntegration:
     @pytest.mark.asyncio
     async def test_stacked_with_retry_as_fallback(self) -> None:
         """Asserts that a RetryMiddleware instance works correctly as a fallback."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         retry_fallback = RetryMiddleware(client=MockProvider(), max_retries=0)
         middleware = FallbackMiddleware(

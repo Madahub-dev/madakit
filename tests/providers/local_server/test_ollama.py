@@ -17,11 +17,11 @@ import json
 import httpx
 import pytest
 
-from mada_modelkit._errors import ProviderError
-from mada_modelkit._types import AgentRequest, AgentResponse, Attachment, StreamChunk
-from mada_modelkit.providers._http_base import HttpAgentClient
-from mada_modelkit.providers._openai_compat import OpenAICompatMixin
-from mada_modelkit.providers.local_server.ollama import OllamaClient
+from madakit._errors import ProviderError
+from madakit._types import AgentRequest, AgentResponse, Attachment, StreamChunk
+from madakit.providers._http_base import HttpAgentClient
+from madakit.providers._openai_compat import OpenAICompatMixin
+from madakit.providers.local_server.ollama import OllamaClient
 
 
 # ---------------------------------------------------------------------------
@@ -34,13 +34,13 @@ class TestModuleExports:
 
     def test_ollama_client_in_all(self) -> None:
         """OllamaClient is listed in __all__."""
-        from mada_modelkit.providers.local_server import ollama
+        from madakit.providers.local_server import ollama
 
         assert "OllamaClient" in ollama.__all__
 
     def test_ollama_client_importable(self) -> None:
         """OllamaClient can be imported directly from its module."""
-        from mada_modelkit.providers.local_server.ollama import OllamaClient as OC
+        from madakit.providers.local_server.ollama import OllamaClient as OC
 
         assert OC is OllamaClient
 

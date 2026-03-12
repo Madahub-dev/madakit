@@ -9,8 +9,8 @@ import asyncio
 
 import pytest
 
-from mada_modelkit._types import AgentRequest, StreamChunk
-from mada_modelkit.middleware.stream_aggregation import StreamAggregationMiddleware
+from madakit._types import AgentRequest, StreamChunk
+from madakit.middleware.stream_aggregation import StreamAggregationMiddleware
 
 from helpers import MockProvider
 
@@ -19,12 +19,12 @@ class TestModuleExports:
     """Verify stream_aggregation module exports."""
 
     def test_module_has_all(self) -> None:
-        from mada_modelkit.middleware import stream_aggregation
+        from madakit.middleware import stream_aggregation
 
         assert hasattr(stream_aggregation, "__all__")
 
     def test_all_contains_stream_aggregation_middleware(self) -> None:
-        from mada_modelkit.middleware.stream_aggregation import __all__
+        from madakit.middleware.stream_aggregation import __all__
 
         assert "StreamAggregationMiddleware" in __all__
 

@@ -23,10 +23,10 @@ import json
 import httpx
 import pytest
 
-from mada_modelkit._errors import ProviderError
-from mada_modelkit._types import AgentRequest, AgentResponse, Attachment
-from mada_modelkit.providers._http_base import HttpAgentClient
-from mada_modelkit.providers.cloud.gemini import GeminiClient
+from madakit._errors import ProviderError
+from madakit._types import AgentRequest, AgentResponse, Attachment
+from madakit.providers._http_base import HttpAgentClient
+from madakit.providers.cloud.gemini import GeminiClient
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -110,13 +110,13 @@ class TestModuleExports:
 
     def test_gemini_client_in_all(self) -> None:
         """GeminiClient is listed in __all__."""
-        from mada_modelkit.providers.cloud import gemini
+        from madakit.providers.cloud import gemini
 
         assert "GeminiClient" in gemini.__all__
 
     def test_gemini_client_importable(self) -> None:
         """GeminiClient can be imported directly from its module."""
-        from mada_modelkit.providers.cloud.gemini import GeminiClient as GC
+        from madakit.providers.cloud.gemini import GeminiClient as GC
 
         assert GC is GeminiClient
 

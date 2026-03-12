@@ -30,10 +30,10 @@ from unittest.mock import patch
 import pytest
 
 from helpers import MockProvider
-from mada_modelkit._base import BaseAgentClient
-from mada_modelkit._errors import ProviderError
-from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
-from mada_modelkit.middleware.cache import CachingMiddleware
+from madakit._base import BaseAgentClient
+from madakit._errors import ProviderError
+from madakit._types import AgentRequest, AgentResponse, StreamChunk
+from madakit.middleware.cache import CachingMiddleware
 
 
 class TestCachingMiddlewareConstructor:
@@ -119,7 +119,7 @@ class TestCachingMiddlewareConstructor:
 
     def test_client_can_be_another_middleware(self) -> None:
         """Asserts that a CachingMiddleware can wrap another middleware (composition)."""
-        from mada_modelkit.middleware.circuit_breaker import CircuitBreakerMiddleware
+        from madakit.middleware.circuit_breaker import CircuitBreakerMiddleware
 
         inner = CircuitBreakerMiddleware(client=MockProvider())
         outer = CachingMiddleware(client=inner)
@@ -356,9 +356,9 @@ class TestTTL:
         provider = MockProvider()
         cm = CachingMiddleware(client=provider, ttl=10.0)
         req = AgentRequest(prompt="hi")
-        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=100.0):
+        with patch("madakit.middleware.cache.time.monotonic", return_value=100.0):
             await cm.send_request(req)
-        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=109.9):
+        with patch("madakit.middleware.cache.time.monotonic", return_value=109.9):
             await cm.send_request(req)  # elapsed=9.9 < 10.0 → valid
         assert provider.call_count == 1
 
@@ -368,9 +368,9 @@ class TestTTL:
         provider = MockProvider()
         cm = CachingMiddleware(client=provider, ttl=10.0)
         req = AgentRequest(prompt="hi")
-        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=100.0):
+        with patch("madakit.middleware.cache.time.monotonic", return_value=100.0):
             await cm.send_request(req)
-        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=111.0):
+        with patch("madakit.middleware.cache.time.monotonic", return_value=111.0):
             await cm.send_request(req)  # elapsed=11.0 >= 10.0 → expired
         assert provider.call_count == 2
 
@@ -380,9 +380,9 @@ class TestTTL:
         provider = MockProvider()
         cm = CachingMiddleware(client=provider, ttl=10.0)
         req = AgentRequest(prompt="hi")
-        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=100.0):
+        with patch("madakit.middleware.cache.time.monotonic", return_value=100.0):
             await cm.send_request(req)
-        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=110.0):
+        with patch("madakit.middleware.cache.time.monotonic", return_value=110.0):
             await cm.send_request(req)  # elapsed=10.0 → not < ttl → expired
         assert provider.call_count == 2
 
@@ -392,9 +392,9 @@ class TestTTL:
         cm = CachingMiddleware(client=MockProvider(), ttl=10.0)
         req = AgentRequest(prompt="hi")
         key = CachingMiddleware._default_key_fn(req)
-        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=100.0):
+        with patch("madakit.middleware.cache.time.monotonic", return_value=100.0):
             await cm.send_request(req)
-        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=115.0):
+        with patch("madakit.middleware.cache.time.monotonic", return_value=115.0):
             await cm.send_request(req)
             _, new_stored_at = cm._cache[key]
         assert new_stored_at == 115.0
@@ -405,12 +405,12 @@ class TestTTL:
         cm = CachingMiddleware(client=MockProvider(), ttl=10.0)
         req = AgentRequest(prompt="hi")
         key = CachingMiddleware._default_key_fn(req)
-        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=100.0):
+        with patch("madakit.middleware.cache.time.monotonic", return_value=100.0):
             await cm.send_request(req)
         # Verify it was stored
         assert key in cm._cache
         # Now expire and re-fetch; entry should be refreshed (not absent after)
-        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=115.0):
+        with patch("madakit.middleware.cache.time.monotonic", return_value=115.0):
             await cm.send_request(req)
         assert key in cm._cache  # new entry stored after re-fetch
 
@@ -686,10 +686,10 @@ class TestSendRequestStream:
         provider = MockProvider()
         cm = CachingMiddleware(client=provider, ttl=10.0)
         req = AgentRequest(prompt="hi")
-        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=100.0):
+        with patch("madakit.middleware.cache.time.monotonic", return_value=100.0):
             async for _ in cm.send_request_stream(req):
                 pass
-        with patch("mada_modelkit.middleware.cache.time.monotonic", return_value=111.0):
+        with patch("madakit.middleware.cache.time.monotonic", return_value=111.0):
             async for _ in cm.send_request_stream(req):
                 pass
         assert provider.call_count == 2
@@ -701,23 +701,23 @@ class TestSendRequestStream:
 
 
 class TestModuleExports:
-    """mada_modelkit.middleware.cache module — __all__ and importability."""
+    """madakit.middleware.cache module — __all__ and importability."""
 
     def test_all_contains_caching_middleware(self) -> None:
         """Asserts that __all__ lists CachingMiddleware."""
-        from mada_modelkit.middleware import cache
+        from madakit.middleware import cache
 
         assert "CachingMiddleware" in cache.__all__
 
     def test_all_has_exactly_one_export(self) -> None:
         """Asserts that __all__ exposes exactly one public name."""
-        from mada_modelkit.middleware import cache
+        from madakit.middleware import cache
 
         assert len(cache.__all__) == 1
 
     def test_caching_middleware_importable_from_module(self) -> None:
         """Asserts that CachingMiddleware can be imported directly from the module."""
-        from mada_modelkit.middleware.cache import CachingMiddleware as CM
+        from madakit.middleware.cache import CachingMiddleware as CM
 
         assert CM is CachingMiddleware
 
@@ -788,7 +788,7 @@ class TestIntegration:
     @pytest.mark.asyncio
     async def test_stacked_with_retry_middleware(self) -> None:
         """Asserts CachingMiddleware correctly composes over RetryMiddleware."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         inner = RetryMiddleware(client=MockProvider(), max_retries=0)
         cm = CachingMiddleware(client=inner)

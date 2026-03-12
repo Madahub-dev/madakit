@@ -10,9 +10,9 @@ import asyncio
 
 import pytest
 
-from mada_modelkit._errors import MiddlewareError
-from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
-from mada_modelkit.middleware.load_balancing import LoadBalancingMiddleware
+from madakit._errors import MiddlewareError
+from madakit._types import AgentRequest, AgentResponse, StreamChunk
+from madakit.middleware.load_balancing import LoadBalancingMiddleware
 
 from helpers import MockProvider
 
@@ -22,13 +22,13 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains only LoadBalancingMiddleware."""
-        from mada_modelkit.middleware import load_balancing
+        from madakit.middleware import load_balancing
 
         assert load_balancing.__all__ == ["LoadBalancingMiddleware"]
 
     def test_middleware_importable(self) -> None:
         """LoadBalancingMiddleware can be imported from module."""
-        from mada_modelkit.middleware.load_balancing import (
+        from madakit.middleware.load_balancing import (
             LoadBalancingMiddleware as LBM,
         )
 

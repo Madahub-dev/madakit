@@ -17,11 +17,11 @@ import json
 import httpx
 import pytest
 
-from mada_modelkit._errors import ProviderError
-from mada_modelkit._types import AgentRequest, AgentResponse, Attachment
-from mada_modelkit.providers._http_base import HttpAgentClient
-from mada_modelkit.providers._openai_compat import OpenAICompatMixin
-from mada_modelkit.providers.cloud.deepseek import DeepSeekClient
+from madakit._errors import ProviderError
+from madakit._types import AgentRequest, AgentResponse, Attachment
+from madakit.providers._http_base import HttpAgentClient
+from madakit.providers._openai_compat import OpenAICompatMixin
+from madakit.providers.cloud.deepseek import DeepSeekClient
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -60,13 +60,13 @@ class TestModuleExports:
 
     def test_deepseek_client_in_all(self) -> None:
         """DeepSeekClient is listed in __all__."""
-        from mada_modelkit.providers.cloud import deepseek
+        from madakit.providers.cloud import deepseek
 
         assert "DeepSeekClient" in deepseek.__all__
 
     def test_deepseek_client_importable(self) -> None:
         """DeepSeekClient can be imported directly from its module."""
-        from mada_modelkit.providers.cloud.deepseek import DeepSeekClient as DC
+        from madakit.providers.cloud.deepseek import DeepSeekClient as DC
 
         assert DC is DeepSeekClient
 

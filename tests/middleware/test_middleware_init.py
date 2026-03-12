@@ -6,8 +6,8 @@ __all__ completeness, and identity of each re-export with its source module.
 
 from __future__ import annotations
 
-import mada_modelkit.middleware as middleware_pkg
-from mada_modelkit.middleware import (
+import madakit.middleware as middleware_pkg
+from madakit.middleware import (
     CachingMiddleware,
     CircuitBreakerMiddleware,
     FallbackMiddleware,
@@ -45,27 +45,27 @@ class TestMiddlewarePackageExports:
 
     def test_retry_middleware_is_same_class_as_source(self) -> None:
         """Asserts that RetryMiddleware re-export is identical to its source class."""
-        from mada_modelkit.middleware.retry import RetryMiddleware as Source
+        from madakit.middleware.retry import RetryMiddleware as Source
         assert RetryMiddleware is Source
 
     def test_circuit_breaker_middleware_is_same_class_as_source(self) -> None:
         """Asserts that CircuitBreakerMiddleware re-export is identical to its source class."""
-        from mada_modelkit.middleware.circuit_breaker import CircuitBreakerMiddleware as Source
+        from madakit.middleware.circuit_breaker import CircuitBreakerMiddleware as Source
         assert CircuitBreakerMiddleware is Source
 
     def test_caching_middleware_is_same_class_as_source(self) -> None:
         """Asserts that CachingMiddleware re-export is identical to its source class."""
-        from mada_modelkit.middleware.cache import CachingMiddleware as Source
+        from madakit.middleware.cache import CachingMiddleware as Source
         assert CachingMiddleware is Source
 
     def test_tracking_middleware_is_same_class_as_source(self) -> None:
         """Asserts that TrackingMiddleware re-export is identical to its source class."""
-        from mada_modelkit.middleware.tracking import TrackingMiddleware as Source
+        from madakit.middleware.tracking import TrackingMiddleware as Source
         assert TrackingMiddleware is Source
 
     def test_fallback_middleware_is_same_class_as_source(self) -> None:
         """Asserts that FallbackMiddleware re-export is identical to its source class."""
-        from mada_modelkit.middleware.fallback import FallbackMiddleware as Source
+        from madakit.middleware.fallback import FallbackMiddleware as Source
         assert FallbackMiddleware is Source
 
     def test_all_has_exactly_five_entries(self) -> None:

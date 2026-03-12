@@ -7,20 +7,20 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._types import AgentRequest
-from mada_modelkit.providers.cloud.cohere import CohereClient
+from madakit._types import AgentRequest
+from madakit.providers.cloud.cohere import CohereClient
 
 
 class TestModuleExports:
     """Verify cohere module exports."""
 
     def test_module_has_all(self) -> None:
-        from mada_modelkit.providers.cloud import cohere
+        from madakit.providers.cloud import cohere
 
         assert hasattr(cohere, "__all__")
 
     def test_all_contains_cohere_client(self) -> None:
-        from mada_modelkit.providers.cloud.cohere import __all__
+        from madakit.providers.cloud.cohere import __all__
 
         assert "CohereClient" in __all__
 

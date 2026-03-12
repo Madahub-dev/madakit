@@ -1,4 +1,4 @@
-"""Tests for mada_modelkit._errors.
+"""Tests for madakit._errors.
 
 Covers the full error hierarchy: AgentError base, ProviderError with
 optional status_code, MiddlewareError, CircuitOpenError, and
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._errors import (
+from madakit._errors import (
     AgentError,
     CircuitOpenError,
     MiddlewareError,

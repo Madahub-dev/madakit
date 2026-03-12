@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._types import AgentRequest
-from mada_modelkit.providers.specialized.stability import StabilityAIClient
+from madakit._types import AgentRequest
+from madakit.providers.specialized.stability import StabilityAIClient
 
 
 class TestModuleExports:
@@ -16,13 +16,13 @@ class TestModuleExports:
 
     def test_module_has_all(self) -> None:
         """Module exports __all__."""
-        from mada_modelkit.providers.specialized import stability
+        from madakit.providers.specialized import stability
 
         assert hasattr(stability, "__all__")
 
     def test_all_contains_stability_client(self) -> None:
         """__all__ contains StabilityAIClient."""
-        from mada_modelkit.providers.specialized.stability import __all__
+        from madakit.providers.specialized.stability import __all__
 
         assert "StabilityAIClient" in __all__
 

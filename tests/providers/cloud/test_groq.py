@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from mada_modelkit.providers.cloud.groq import GroqClient
+from madakit.providers.cloud.groq import GroqClient
 
 
 class TestGroqClient:

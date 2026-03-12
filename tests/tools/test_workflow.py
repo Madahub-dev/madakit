@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._types import AgentRequest, AgentResponse
-from mada_modelkit.tools.workflow import Step, Workflow, WorkflowError, WorkflowState
+from madakit._types import AgentRequest, AgentResponse
+from madakit.tools.workflow import Step, Workflow, WorkflowError, WorkflowState
 
 from helpers import MockProvider
 
@@ -17,12 +17,12 @@ class TestModuleExports:
     """Verify workflow module exports."""
 
     def test_module_has_all(self) -> None:
-        from mada_modelkit.tools import workflow
+        from madakit.tools import workflow
 
         assert hasattr(workflow, "__all__")
 
     def test_all_contains_expected_names(self) -> None:
-        from mada_modelkit.tools.workflow import __all__
+        from madakit.tools.workflow import __all__
 
         assert "Step" in __all__
         assert "Workflow" in __all__

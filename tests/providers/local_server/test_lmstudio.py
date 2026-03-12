@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._types import AgentRequest
-from mada_modelkit.providers.local_server.lmstudio import LMStudioClient
+from madakit._types import AgentRequest
+from madakit.providers.local_server.lmstudio import LMStudioClient
 
 
 class TestModuleExports:
@@ -16,13 +16,13 @@ class TestModuleExports:
 
     def test_module_has_all(self) -> None:
         """Module exports __all__."""
-        from mada_modelkit.providers.local_server import lmstudio
+        from madakit.providers.local_server import lmstudio
 
         assert hasattr(lmstudio, "__all__")
 
     def test_all_contains_lmstudio_client(self) -> None:
         """__all__ contains LMStudioClient."""
-        from mada_modelkit.providers.local_server.lmstudio import __all__
+        from madakit.providers.local_server.lmstudio import __all__
 
         assert "LMStudioClient" in __all__
 

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from mada_modelkit.cli.migrate import (
+from madakit.cli.migrate import (
     migrate_langchain,
     convert_config,
     check_compatibility,
@@ -27,7 +27,7 @@ class TestMigrateLangChain:
 
         result = migrate_langchain(code)
 
-        assert "from mada_modelkit.providers.cloud.OpenAI import OpenAIClient" in result
+        assert "from madakit.providers.cloud.OpenAI import OpenAIClient" in result
 
     def test_migrate_instantiation(self) -> None:
         """migrate_langchain converts instantiation."""
@@ -52,7 +52,7 @@ class TestMigrateLangChain:
 
         result = migrate_langchain(code)
 
-        assert "from mada_modelkit._types import AgentRequest" in result
+        assert "from madakit._types import AgentRequest" in result
 
     def test_migrate_llmchain_comment(self) -> None:
         """migrate_langchain adds TODO for LLMChain."""

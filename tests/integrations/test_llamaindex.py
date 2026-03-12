@@ -16,7 +16,7 @@ except ImportError:
     LLAMAINDEX_AVAILABLE = False
 
 if LLAMAINDEX_AVAILABLE:
-    from mada_modelkit.integrations.llamaindex import MadaKitLLM, MadaKitEmbedding
+    from madakit.integrations.llamaindex import MadaKitLLM, MadaKitEmbedding
 
 from helpers import MockProvider
 
@@ -30,19 +30,19 @@ class TestModuleExports:
 
     def test_module_has_all(self) -> None:
         """Module exports __all__."""
-        from mada_modelkit.integrations import llamaindex
+        from madakit.integrations import llamaindex
 
         assert hasattr(llamaindex, "__all__")
 
     def test_all_contains_madakit_llm(self) -> None:
         """__all__ contains MadaKitLLM."""
-        from mada_modelkit.integrations.llamaindex import __all__
+        from madakit.integrations.llamaindex import __all__
 
         assert "MadaKitLLM" in __all__
 
     def test_all_contains_madakit_embedding(self) -> None:
         """__all__ contains MadaKitEmbedding."""
-        from mada_modelkit.integrations.llamaindex import __all__
+        from madakit.integrations.llamaindex import __all__
 
         assert "MadaKitEmbedding" in __all__
 

@@ -26,10 +26,10 @@ import httpx
 import pytest
 
 
-from mada_modelkit._base import BaseAgentClient
-from mada_modelkit._errors import ProviderError
-from mada_modelkit._types import AgentRequest, AgentResponse
-from mada_modelkit.providers._http_base import HttpAgentClient
+from madakit._base import BaseAgentClient
+from madakit._errors import ProviderError
+from madakit._types import AgentRequest, AgentResponse
+from madakit.providers._http_base import HttpAgentClient
 
 
 # ---------------------------------------------------------------------------
@@ -248,17 +248,17 @@ class TestModuleExports:
 
     def test_all_is_defined(self) -> None:
         """Asserts that __all__ is defined in _http_base."""
-        import mada_modelkit.providers._http_base as mod
+        import madakit.providers._http_base as mod
         assert hasattr(mod, "__all__")
 
     def test_http_agent_client_in_all(self) -> None:
         """Asserts that 'HttpAgentClient' is listed in __all__."""
-        import mada_modelkit.providers._http_base as mod
+        import madakit.providers._http_base as mod
         assert "HttpAgentClient" in mod.__all__
 
     def test_http_agent_client_importable(self) -> None:
         """Asserts that HttpAgentClient can be imported from the module."""
-        from mada_modelkit.providers._http_base import HttpAgentClient as HAC
+        from madakit.providers._http_base import HttpAgentClient as HAC
         assert HAC is HttpAgentClient
 
 
@@ -644,7 +644,7 @@ class TestIntegration:
         """Asserts that HttpAgentClient works correctly when wrapped by RetryMiddleware."""
         import asyncio
 
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         call_count = 0
 

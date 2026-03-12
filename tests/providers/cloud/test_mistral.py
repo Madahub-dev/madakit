@@ -7,20 +7,20 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._types import AgentRequest
-from mada_modelkit.providers.cloud.mistral import MistralClient
+from madakit._types import AgentRequest
+from madakit.providers.cloud.mistral import MistralClient
 
 
 class TestModuleExports:
     """Verify mistral module exports."""
 
     def test_module_has_all(self) -> None:
-        from mada_modelkit.providers.cloud import mistral
+        from madakit.providers.cloud import mistral
 
         assert hasattr(mistral, "__all__")
 
     def test_all_contains_mistral_client(self) -> None:
-        from mada_modelkit.providers.cloud.mistral import __all__
+        from madakit.providers.cloud.mistral import __all__
 
         assert "MistralClient" in __all__
 

@@ -24,9 +24,9 @@ from typing import Any
 import httpx
 import pytest
 
-from mada_modelkit._types import AgentRequest, AgentResponse, Attachment
-from mada_modelkit.providers._http_base import HttpAgentClient
-from mada_modelkit.providers._openai_compat import OpenAICompatMixin
+from madakit._types import AgentRequest, AgentResponse, Attachment
+from madakit.providers._http_base import HttpAgentClient
+from madakit.providers._openai_compat import OpenAICompatMixin
 
 
 # ---------------------------------------------------------------------------
@@ -410,17 +410,17 @@ class TestModuleExports:
 
     def test_all_is_defined(self) -> None:
         """Asserts that __all__ is defined in _openai_compat."""
-        import mada_modelkit.providers._openai_compat as mod
+        import madakit.providers._openai_compat as mod
         assert hasattr(mod, "__all__")
 
     def test_openai_compat_mixin_in_all(self) -> None:
         """Asserts that 'OpenAICompatMixin' is listed in __all__."""
-        import mada_modelkit.providers._openai_compat as mod
+        import madakit.providers._openai_compat as mod
         assert "OpenAICompatMixin" in mod.__all__
 
     def test_openai_compat_mixin_importable(self) -> None:
         """Asserts that OpenAICompatMixin can be imported from the module."""
-        from mada_modelkit.providers._openai_compat import OpenAICompatMixin as OAC
+        from madakit.providers._openai_compat import OpenAICompatMixin as OAC
         assert OAC is OpenAICompatMixin
 
 

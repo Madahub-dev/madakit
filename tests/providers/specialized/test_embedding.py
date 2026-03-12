@@ -9,8 +9,8 @@ import json
 
 import pytest
 
-from mada_modelkit._types import AgentRequest
-from mada_modelkit.providers.specialized.embedding import EmbeddingProvider
+from madakit._types import AgentRequest
+from madakit.providers.specialized.embedding import EmbeddingProvider
 
 
 class TestModuleExports:
@@ -18,13 +18,13 @@ class TestModuleExports:
 
     def test_module_has_all(self) -> None:
         """Module exports __all__."""
-        from mada_modelkit.providers.specialized import embedding
+        from madakit.providers.specialized import embedding
 
         assert hasattr(embedding, "__all__")
 
     def test_all_contains_embedding_provider(self) -> None:
         """__all__ contains EmbeddingProvider."""
-        from mada_modelkit.providers.specialized.embedding import __all__
+        from madakit.providers.specialized.embedding import __all__
 
         assert "EmbeddingProvider" in __all__
 

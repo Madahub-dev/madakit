@@ -24,10 +24,10 @@ from unittest.mock import patch
 import pytest
 
 from helpers import MockProvider
-from mada_modelkit._base import BaseAgentClient
-from mada_modelkit._errors import CircuitOpenError, ProviderError
-from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
-from mada_modelkit.middleware.circuit_breaker import CircuitBreakerMiddleware
+from madakit._base import BaseAgentClient
+from madakit._errors import CircuitOpenError, ProviderError
+from madakit._types import AgentRequest, AgentResponse, StreamChunk
+from madakit.middleware.circuit_breaker import CircuitBreakerMiddleware
 
 
 class _UnhealthyProvider(MockProvider):
@@ -117,7 +117,7 @@ class TestCircuitBreakerConstructor:
 
     def test_client_can_be_another_middleware(self) -> None:
         """Asserts that a middleware can wrap another middleware (composition)."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         inner = RetryMiddleware(client=MockProvider())
         outer = CircuitBreakerMiddleware(client=inner)
@@ -214,7 +214,7 @@ class TestStateMachine:
         cb = CircuitBreakerMiddleware(client=MockProvider(), recovery_timeout=10.0)
         cb._state = "open"
         cb._last_failure_time = 100.0
-        with patch("mada_modelkit.middleware.circuit_breaker.time.monotonic", return_value=111.0):
+        with patch("madakit.middleware.circuit_breaker.time.monotonic", return_value=111.0):
             state = await cb._check_state()
         assert state == "half-open"
 
@@ -225,7 +225,7 @@ class TestStateMachine:
         cb._state = "open"
         cb._last_failure_time = 100.0
         # elapsed = 109.9 < 10.0 → still open
-        with patch("mada_modelkit.middleware.circuit_breaker.time.monotonic", return_value=109.9):
+        with patch("madakit.middleware.circuit_breaker.time.monotonic", return_value=109.9):
             state = await cb._check_state()
         assert state == "open"
 
@@ -754,23 +754,23 @@ class TestConcurrentAccess:
 
 
 class TestModuleExports:
-    """mada_modelkit.middleware.circuit_breaker module — __all__ and importability."""
+    """madakit.middleware.circuit_breaker module — __all__ and importability."""
 
     def test_all_contains_circuit_breaker_middleware(self) -> None:
         """Asserts that __all__ lists CircuitBreakerMiddleware."""
-        from mada_modelkit.middleware import circuit_breaker
+        from madakit.middleware import circuit_breaker
 
         assert "CircuitBreakerMiddleware" in circuit_breaker.__all__
 
     def test_all_has_exactly_one_export(self) -> None:
         """Asserts that __all__ exposes exactly one public name."""
-        from mada_modelkit.middleware import circuit_breaker
+        from madakit.middleware import circuit_breaker
 
         assert len(circuit_breaker.__all__) == 1
 
     def test_circuit_breaker_middleware_importable_from_module(self) -> None:
         """Asserts that CircuitBreakerMiddleware can be imported directly from the module."""
-        from mada_modelkit.middleware.circuit_breaker import (
+        from madakit.middleware.circuit_breaker import (
             CircuitBreakerMiddleware as CB,
         )
 
@@ -857,7 +857,7 @@ class TestIntegration:
     @pytest.mark.asyncio
     async def test_stacked_circuit_breaker_wraps_retry_middleware(self) -> None:
         """Asserts CircuitBreakerMiddleware correctly composes over RetryMiddleware."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         inner = RetryMiddleware(client=MockProvider(), max_retries=0)
         cb = CircuitBreakerMiddleware(client=inner, failure_threshold=5)

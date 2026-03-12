@@ -11,9 +11,9 @@ from typing import AsyncIterator
 
 import pytest
 
-from mada_modelkit._errors import MiddlewareError
-from mada_modelkit._types import AgentRequest, AgentResponse
-from mada_modelkit.middleware.batching import BatchingMiddleware
+from madakit._errors import MiddlewareError
+from madakit._types import AgentRequest, AgentResponse
+from madakit.middleware.batching import BatchingMiddleware
 
 from helpers import MockProvider
 
@@ -34,12 +34,12 @@ class TestModuleExports:
     """Verify batching module exports."""
 
     def test_module_has_all(self) -> None:
-        from mada_modelkit.middleware import batching
+        from madakit.middleware import batching
 
         assert hasattr(batching, "__all__")
 
     def test_all_contains_batching_middleware(self) -> None:
-        from mada_modelkit.middleware.batching import __all__
+        from madakit.middleware.batching import __all__
 
         assert "BatchingMiddleware" in __all__
 

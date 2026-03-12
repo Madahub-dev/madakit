@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from mada_modelkit.providers.cloud.fireworks import FireworksClient
+from madakit.providers.cloud.fireworks import FireworksClient
 
 
 class TestFireworksClient:

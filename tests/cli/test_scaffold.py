@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from mada_modelkit.cli.scaffold import (
+from madakit.cli.scaffold import (
     scaffold_provider,
     scaffold_middleware,
     scaffold_test,

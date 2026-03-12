@@ -9,8 +9,8 @@ from __future__ import annotations
 import logging
 import pytest
 
-from mada_modelkit.middleware.logging import LoggingMiddleware
-from mada_modelkit._types import AgentRequest, AgentResponse
+from madakit.middleware.logging import LoggingMiddleware
+from madakit._types import AgentRequest, AgentResponse
 
 from helpers import MockProvider
 
@@ -20,13 +20,13 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains only LoggingMiddleware."""
-        from mada_modelkit.middleware import logging as logging_module
+        from madakit.middleware import logging as logging_module
 
         assert logging_module.__all__ == ["LoggingMiddleware"]
 
     def test_middleware_importable(self) -> None:
         """LoggingMiddleware can be imported from module."""
-        from mada_modelkit.middleware.logging import LoggingMiddleware as LM
+        from madakit.middleware.logging import LoggingMiddleware as LM
 
         assert LM is not None
 
@@ -95,7 +95,7 @@ class TestLoggingMiddlewareConstructor:
         middleware = LoggingMiddleware(client=mock)
 
         # Default logger should be from the logging module
-        assert middleware._logger.name == "mada_modelkit.middleware.logging"
+        assert middleware._logger.name == "madakit.middleware.logging"
 
     def test_wraps_base_agent_client(self) -> None:
         """LoggingMiddleware can wrap any BaseAgentClient."""
@@ -110,7 +110,7 @@ class TestLoggingMiddlewareConstructor:
 
     def test_wraps_middleware(self) -> None:
         """LoggingMiddleware can wrap another middleware."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         mock = MockProvider()
         retry_mw = RetryMiddleware(client=mock, max_retries=3)
@@ -239,7 +239,7 @@ class TestRequestLogging:
         class MultiChunkProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk", is_final=True)
 
@@ -397,7 +397,7 @@ class TestResponseLogging:
         class MultiChunkProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk1", is_final=False)
                 yield StreamChunk(
@@ -427,7 +427,7 @@ class TestResponseLogging:
         class TokenCountingProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="hello", is_final=False)
                 yield StreamChunk(
@@ -478,7 +478,7 @@ class TestResponseLogging:
         class NoFinalChunkProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk1", is_final=False)
                 yield StreamChunk(delta="chunk2", is_final=False)
@@ -503,7 +503,7 @@ class TestErrorLogging:
     @pytest.mark.asyncio
     async def test_send_request_logs_error(self, caplog) -> None:
         """send_request logs errors with exception details."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -526,7 +526,7 @@ class TestErrorLogging:
     @pytest.mark.asyncio
     async def test_error_logging_includes_request_id(self, caplog) -> None:
         """Error log includes same request_id as request log."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -550,7 +550,7 @@ class TestErrorLogging:
     @pytest.mark.asyncio
     async def test_error_logging_includes_exception_type(self, caplog) -> None:
         """Error log includes exception type name."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -571,7 +571,7 @@ class TestErrorLogging:
     @pytest.mark.asyncio
     async def test_error_logging_includes_exception_message(self, caplog) -> None:
         """Error log includes exception message."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -592,7 +592,7 @@ class TestErrorLogging:
     @pytest.mark.asyncio
     async def test_error_logging_includes_duration(self, caplog) -> None:
         """Error log includes duration until error occurred."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -614,7 +614,7 @@ class TestErrorLogging:
     @pytest.mark.asyncio
     async def test_error_logging_includes_stack_trace(self, caplog) -> None:
         """Error log includes stack trace (exc_info=True)."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -636,7 +636,7 @@ class TestErrorLogging:
     @pytest.mark.asyncio
     async def test_exception_propagates_after_logging(self) -> None:
         """Exception is re-raised after logging."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -654,7 +654,7 @@ class TestErrorLogging:
     @pytest.mark.asyncio
     async def test_send_request_stream_logs_error(self, caplog) -> None:
         """send_request_stream logs errors with exception details."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingStreamProvider(MockProvider):
             async def send_request_stream(self, request):
@@ -680,7 +680,7 @@ class TestErrorLogging:
     @pytest.mark.asyncio
     async def test_error_log_level_is_error(self, caplog) -> None:
         """Errors are logged at ERROR level."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -827,7 +827,7 @@ class TestCorrelationIDPropagation:
 
             async def send_request_stream(self, request):
                 self.received_request = request
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="test", is_final=True)
 
@@ -933,7 +933,7 @@ class TestLoggingComprehensive:
     @pytest.mark.asyncio
     async def test_error_request_lifecycle_logging(self, caplog) -> None:
         """Failed request logs start and error (no completion)."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -1000,7 +1000,7 @@ class TestLoggingComprehensive:
     @pytest.mark.asyncio
     async def test_id_propagation_through_middleware_stack(self) -> None:
         """Request ID propagates through multiple middleware layers."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         class InspectingProvider(MockProvider):
             def __init__(self):
@@ -1027,7 +1027,7 @@ class TestLoggingComprehensive:
     @pytest.mark.asyncio
     async def test_middleware_composition_with_cost_control(self, caplog) -> None:
         """LoggingMiddleware stacks with CostControlMiddleware."""
-        from mada_modelkit.middleware.cost_control import CostControlMiddleware
+        from madakit.middleware.cost_control import CostControlMiddleware
 
         mock = MockProvider()
         cost_fn = lambda resp: 1.5
@@ -1066,7 +1066,7 @@ class TestLoggingComprehensive:
         class MultiChunkProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk1", is_final=False)
                 yield StreamChunk(delta="chunk2", is_final=False)
@@ -1148,7 +1148,7 @@ class TestLoggingComprehensive:
     @pytest.mark.asyncio
     async def test_different_log_levels_filter_correctly(self, caplog) -> None:
         """Different log levels produce expected output."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -1181,7 +1181,7 @@ class TestLoggingComprehensive:
     async def test_logging_with_timeout_middleware(self, caplog) -> None:
         """LoggingMiddleware works with TimeoutMiddleware."""
         import asyncio
-        from mada_modelkit.middleware.timeout import TimeoutMiddleware
+        from madakit.middleware.timeout import TimeoutMiddleware
 
         mock = MockProvider()
         timeout_mw = TimeoutMiddleware(client=mock, timeout_seconds=1.0)

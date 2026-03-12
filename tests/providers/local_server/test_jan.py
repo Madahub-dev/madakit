@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._types import AgentRequest
-from mada_modelkit.providers.local_server.jan import JanClient
+from madakit._types import AgentRequest
+from madakit.providers.local_server.jan import JanClient
 
 
 class TestModuleExports:
@@ -16,13 +16,13 @@ class TestModuleExports:
 
     def test_module_has_all(self) -> None:
         """Module exports __all__."""
-        from mada_modelkit.providers.local_server import jan
+        from madakit.providers.local_server import jan
 
         assert hasattr(jan, "__all__")
 
     def test_all_contains_jan_client(self) -> None:
         """__all__ contains JanClient."""
-        from mada_modelkit.providers.local_server.jan import __all__
+        from madakit.providers.local_server.jan import __all__
 
         assert "JanClient" in __all__
 

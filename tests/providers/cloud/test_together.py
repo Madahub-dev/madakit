@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from mada_modelkit.providers.cloud.together import TogetherClient
+from madakit.providers.cloud.together import TogetherClient
 
 
 class TestTogetherClient:

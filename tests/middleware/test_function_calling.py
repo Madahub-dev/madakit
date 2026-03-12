@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._errors import MiddlewareError
-from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
-from mada_modelkit.middleware.function_calling import FunctionCallingMiddleware
-from mada_modelkit.tools.registry import ToolRegistry
+from madakit._errors import MiddlewareError
+from madakit._types import AgentRequest, AgentResponse, StreamChunk
+from madakit.middleware.function_calling import FunctionCallingMiddleware
+from madakit.tools.registry import ToolRegistry
 
 from helpers import MockProvider
 
@@ -21,13 +21,13 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains only FunctionCallingMiddleware."""
-        from mada_modelkit.middleware import function_calling
+        from madakit.middleware import function_calling
 
         assert function_calling.__all__ == ["FunctionCallingMiddleware"]
 
     def test_middleware_importable(self) -> None:
         """FunctionCallingMiddleware can be imported from module."""
-        from mada_modelkit.middleware.function_calling import (
+        from madakit.middleware.function_calling import (
             FunctionCallingMiddleware as FCM,
         )
 

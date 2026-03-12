@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._types import AgentRequest, AgentResponse
-from mada_modelkit.middleware.ab_test import ABTestMiddleware
+from madakit._types import AgentRequest, AgentResponse
+from madakit.middleware.ab_test import ABTestMiddleware
 
 from helpers import MockProvider
 
@@ -19,13 +19,13 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains only ABTestMiddleware."""
-        from mada_modelkit.middleware import ab_test
+        from madakit.middleware import ab_test
 
         assert ab_test.__all__ == ["ABTestMiddleware"]
 
     def test_middleware_importable(self) -> None:
         """ABTestMiddleware can be imported from module."""
-        from mada_modelkit.middleware.ab_test import ABTestMiddleware as ABM
+        from madakit.middleware.ab_test import ABTestMiddleware as ABM
 
         assert ABM is not None
 
@@ -269,7 +269,7 @@ class TestMetadataTagging:
         """send_request_stream adds variant to final chunk metadata."""
         class StreamProvider(MockProvider):
             async def send_request_stream(self, request):
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk1", is_final=False)
                 yield StreamChunk(delta="chunk2", is_final=True, metadata={"model": "test"})
@@ -296,7 +296,7 @@ class TestMetadataTagging:
         """send_request_stream preserves all chunks."""
         class MultiChunkProvider(MockProvider):
             async def send_request_stream(self, request):
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="a", is_final=False)
                 yield StreamChunk(delta="b", is_final=False)

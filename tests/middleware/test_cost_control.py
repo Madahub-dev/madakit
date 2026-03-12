@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._types import AgentRequest, AgentResponse
-from mada_modelkit.middleware.cost_control import CostControlMiddleware
+from madakit._types import AgentRequest, AgentResponse
+from madakit.middleware.cost_control import CostControlMiddleware
 from helpers import MockProvider
 
 
@@ -18,14 +18,14 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains CostControlMiddleware."""
-        from mada_modelkit.middleware import cost_control
+        from madakit.middleware import cost_control
         assert hasattr(cost_control, "__all__")
         assert "CostControlMiddleware" in cost_control.__all__
         assert len(cost_control.__all__) == 1
 
     def test_middleware_importable(self) -> None:
         """CostControlMiddleware is importable from cost_control module."""
-        from mada_modelkit.middleware.cost_control import CostControlMiddleware as Imported
+        from madakit.middleware.cost_control import CostControlMiddleware as Imported
         assert Imported is CostControlMiddleware
 
 
@@ -104,7 +104,7 @@ class TestCostControlMiddlewareConstructor:
     def test_wraps_middleware(self) -> None:
         """Can wrap another middleware instance."""
         mock = MockProvider()
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
         retry = RetryMiddleware(client=mock, max_retries=2)
         cost_fn = lambda resp: 0.01
         middleware = CostControlMiddleware(client=retry, cost_fn=cost_fn)
@@ -276,7 +276,7 @@ class TestBudgetCapEnforcement:
 
     def test_cap_enforcement_raises_on_exceed(self) -> None:
         """Exceeding budget_cap raises BudgetExceededError."""
-        from mada_modelkit._errors import BudgetExceededError
+        from madakit._errors import BudgetExceededError
 
         mock = MockProvider()
         cost_fn = lambda resp: 5.0
@@ -292,7 +292,7 @@ class TestBudgetCapEnforcement:
 
     def test_cap_enforcement_error_message(self) -> None:
         """BudgetExceededError includes current spend, cost, and cap."""
-        from mada_modelkit._errors import BudgetExceededError
+        from madakit._errors import BudgetExceededError
 
         mock = MockProvider()
         cost_fn = lambda resp: 6.0
@@ -325,13 +325,13 @@ class TestBudgetCapEnforcement:
         assert middleware.total_spend == 10.0
 
         # Fifth would exceed
-        from mada_modelkit._errors import BudgetExceededError
+        from madakit._errors import BudgetExceededError
         with pytest.raises(BudgetExceededError):
             middleware._track_cost(response)
 
     def test_cap_enforcement_doesnt_increment_on_exceed(self) -> None:
         """When cap is exceeded, spend is not incremented."""
-        from mada_modelkit._errors import BudgetExceededError
+        from madakit._errors import BudgetExceededError
 
         mock = MockProvider()
         cost_fn = lambda resp: 8.0
@@ -362,7 +362,7 @@ class TestBudgetCapEnforcement:
 
     def test_fractional_cap_enforcement(self) -> None:
         """Fractional budget caps work correctly."""
-        from mada_modelkit._errors import BudgetExceededError
+        from madakit._errors import BudgetExceededError
 
         mock = MockProvider()
         cost_fn = lambda resp: 0.3
@@ -380,7 +380,7 @@ class TestBudgetCapEnforcement:
 
     def test_very_small_cap(self) -> None:
         """Very small caps (< 1) are enforced correctly."""
-        from mada_modelkit._errors import BudgetExceededError
+        from madakit._errors import BudgetExceededError
 
         mock = MockProvider()
         cost_fn = lambda resp: 0.01
@@ -399,7 +399,7 @@ class TestBudgetCapEnforcement:
 
     def test_budget_exceeded_is_middleware_error(self) -> None:
         """BudgetExceededError inherits from MiddlewareError."""
-        from mada_modelkit._errors import BudgetExceededError, MiddlewareError
+        from madakit._errors import BudgetExceededError, MiddlewareError
 
         assert issubclass(BudgetExceededError, MiddlewareError)
 
@@ -516,7 +516,7 @@ class TestAlertCallbacks:
 
         # Third request: 21.0 (crosses 15.0)
         # But this would exceed cap (21.0 > 20.0), so it will raise
-        from mada_modelkit._errors import BudgetExceededError
+        from madakit._errors import BudgetExceededError
         with pytest.raises(BudgetExceededError):
             middleware._track_cost(response)
 
@@ -739,7 +739,7 @@ class TestBudgetReset:
 
     def test_reset_with_budget_cap(self) -> None:
         """reset_budget() allows spending up to cap again."""
-        from mada_modelkit._errors import BudgetExceededError
+        from madakit._errors import BudgetExceededError
 
         mock = MockProvider()
         cost_fn = lambda resp: 6.0
@@ -800,7 +800,7 @@ class TestCostControlComprehensive:
         class TokenCountingProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="Hello", is_final=False)
                 yield StreamChunk(delta=" world", is_final=False)
@@ -828,7 +828,7 @@ class TestCostControlComprehensive:
     @pytest.mark.asyncio
     async def test_send_request_enforces_budget_cap(self) -> None:
         """send_request raises BudgetExceededError when cap reached."""
-        from mada_modelkit._errors import BudgetExceededError
+        from madakit._errors import BudgetExceededError
 
         mock = MockProvider()
         cost_fn = lambda resp: 5.0
@@ -852,12 +852,12 @@ class TestCostControlComprehensive:
     @pytest.mark.asyncio
     async def test_send_request_stream_enforces_budget_cap(self) -> None:
         """send_request_stream raises BudgetExceededError when cap reached."""
-        from mada_modelkit._errors import BudgetExceededError
+        from madakit._errors import BudgetExceededError
 
         class TokenCountingProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="test", is_final=False)
                 yield StreamChunk(delta="", is_final=True, metadata={"input_tokens": 10, "output_tokens": 20})
@@ -944,7 +944,7 @@ class TestCostControlComprehensive:
         class TokenCountingProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="test", is_final=True, metadata={"input_tokens": 10, "output_tokens": 20})
 
@@ -985,7 +985,7 @@ class TestCostControlComprehensive:
     @pytest.mark.asyncio
     async def test_exception_propagation_from_wrapped_client(self) -> None:
         """Exceptions from wrapped client propagate correctly."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -1020,8 +1020,8 @@ class TestCostControlComprehensive:
     @pytest.mark.asyncio
     async def test_middleware_composition_with_retry(self) -> None:
         """CostControlMiddleware stacks with RetryMiddleware."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
-        from mada_modelkit._errors import ProviderError
+        from madakit.middleware.retry import RetryMiddleware
+        from madakit._errors import ProviderError
 
         class FlakeyProvider(MockProvider):
             def __init__(self):

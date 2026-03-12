@@ -1,4 +1,4 @@
-"""Tests for mada_modelkit._types.
+"""Tests for madakit._types.
 
 Covers all five public dataclasses (Attachment, AgentRequest, AgentResponse,
 StreamChunk, TrackingStats): construction, defaults, the total_tokens property,
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from mada_modelkit._types import (
+from madakit._types import (
     AgentRequest,
     AgentResponse,
     Attachment,

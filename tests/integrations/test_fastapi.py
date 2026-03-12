@@ -17,9 +17,9 @@ except ImportError:
     FASTAPI_AVAILABLE = False
 
 if FASTAPI_AVAILABLE:
-    from mada_modelkit.integrations.fastapi import get_client, stream_response
+    from madakit.integrations.fastapi import get_client, stream_response
 
-from mada_modelkit._types import AgentRequest
+from madakit._types import AgentRequest
 from helpers import MockProvider
 
 pytestmark = pytest.mark.skipif(
@@ -32,19 +32,19 @@ class TestModuleExports:
 
     def test_module_has_all(self) -> None:
         """Module exports __all__."""
-        from mada_modelkit.integrations import fastapi
+        from madakit.integrations import fastapi
 
         assert hasattr(fastapi, "__all__")
 
     def test_all_contains_get_client(self) -> None:
         """__all__ contains get_client."""
-        from mada_modelkit.integrations.fastapi import __all__
+        from madakit.integrations.fastapi import __all__
 
         assert "get_client" in __all__
 
     def test_all_contains_stream_response(self) -> None:
         """__all__ contains stream_response."""
-        from mada_modelkit.integrations.fastapi import __all__
+        from madakit.integrations.fastapi import __all__
 
         assert "stream_response" in __all__
 

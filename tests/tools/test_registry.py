@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._errors import MiddlewareError
-from mada_modelkit.tools.registry import Tool, ToolRegistry
+from madakit._errors import MiddlewareError
+from madakit.tools.registry import Tool, ToolRegistry
 
 
 class TestModuleExports:
@@ -17,13 +17,13 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains Tool and ToolRegistry."""
-        from mada_modelkit.tools import registry
+        from madakit.tools import registry
 
         assert set(registry.__all__) == {"Tool", "ToolRegistry"}
 
     def test_classes_importable(self) -> None:
         """Tool and ToolRegistry can be imported from module."""
-        from mada_modelkit.tools.registry import Tool as T, ToolRegistry as TR
+        from madakit.tools.registry import Tool as T, ToolRegistry as TR
 
         assert T is not None
         assert TR is not None

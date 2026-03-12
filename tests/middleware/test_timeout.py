@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit.middleware.timeout import TimeoutMiddleware
-from mada_modelkit._types import AgentRequest, AgentResponse
+from madakit.middleware.timeout import TimeoutMiddleware
+from madakit._types import AgentRequest, AgentResponse
 
 from helpers import MockProvider
 
@@ -19,13 +19,13 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains only TimeoutMiddleware."""
-        from mada_modelkit.middleware import timeout
+        from madakit.middleware import timeout
 
         assert timeout.__all__ == ["TimeoutMiddleware"]
 
     def test_middleware_importable(self) -> None:
         """TimeoutMiddleware can be imported from module."""
-        from mada_modelkit.middleware.timeout import TimeoutMiddleware as TM
+        from madakit.middleware.timeout import TimeoutMiddleware as TM
 
         assert TM is not None
 
@@ -77,7 +77,7 @@ class TestTimeoutMiddlewareConstructor:
 
     def test_wraps_middleware(self) -> None:
         """TimeoutMiddleware can wrap another middleware."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         mock = MockProvider()
         retry_mw = RetryMiddleware(client=mock, max_retries=3)
@@ -193,7 +193,7 @@ class TestSendRequestWithTimeout:
     @pytest.mark.asyncio
     async def test_exception_propagation_before_timeout(self) -> None:
         """Exceptions from wrapped client propagate before timeout."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -256,7 +256,7 @@ class TestSendRequestStreamWithTimeout:
         class MultiChunkProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk1", is_final=False)
                 yield StreamChunk(delta="chunk2", is_final=False)
@@ -283,7 +283,7 @@ class TestSendRequestStreamWithTimeout:
         class SlowFirstChunkProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 await asyncio.sleep(0.3)  # Delay before first chunk
                 yield StreamChunk(delta="chunk1", is_final=True)
@@ -305,7 +305,7 @@ class TestSendRequestStreamWithTimeout:
         class SlowSubsequentChunksProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 # First chunk arrives quickly
                 yield StreamChunk(delta="chunk1", is_final=False)
@@ -337,7 +337,7 @@ class TestSendRequestStreamWithTimeout:
         class SingleChunkProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="only chunk", is_final=True)
 
@@ -356,7 +356,7 @@ class TestSendRequestStreamWithTimeout:
     @pytest.mark.asyncio
     async def test_stream_exception_propagation(self) -> None:
         """Exceptions from wrapped client stream propagate correctly."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingStreamProvider(MockProvider):
             async def send_request_stream(self, request):
@@ -385,7 +385,7 @@ class TestSendRequestStreamWithTimeout:
 
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 await asyncio.sleep(self.delay)
                 yield StreamChunk(delta="chunk", is_final=True)
@@ -447,7 +447,7 @@ class TestTimeoutComprehensive:
 
             async def send_request_stream(self, request):
                 await asyncio.sleep(0.3)
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="test", is_final=True)
 
@@ -469,8 +469,8 @@ class TestTimeoutComprehensive:
     async def test_middleware_composition_with_retry(self) -> None:
         """TimeoutMiddleware stacks with RetryMiddleware."""
         import asyncio
-        from mada_modelkit.middleware.retry import RetryMiddleware
-        from mada_modelkit._errors import ProviderError
+        from madakit.middleware.retry import RetryMiddleware
+        from madakit._errors import ProviderError
 
         class FlakeyProvider(MockProvider):
             def __init__(self):
@@ -497,7 +497,7 @@ class TestTimeoutComprehensive:
     async def test_middleware_composition_with_cost_control(self) -> None:
         """TimeoutMiddleware stacks with CostControlMiddleware."""
         import asyncio
-        from mada_modelkit.middleware.cost_control import CostControlMiddleware
+        from madakit.middleware.cost_control import CostControlMiddleware
 
         mock = MockProvider()
         cost_fn = lambda resp: 1.5
@@ -514,7 +514,7 @@ class TestTimeoutComprehensive:
     async def test_timeout_wraps_cost_control_slow_request(self) -> None:
         """Timeout prevents slow request from incurring cost."""
         import asyncio
-        from mada_modelkit.middleware.cost_control import CostControlMiddleware
+        from madakit.middleware.cost_control import CostControlMiddleware
 
         mock = MockProvider(latency=0.5)
         cost_fn = lambda resp: 10.0
@@ -580,7 +580,7 @@ class TestTimeoutComprehensive:
     @pytest.mark.asyncio
     async def test_timeout_doesnt_swallow_other_exceptions(self) -> None:
         """Timeout middleware doesn't hide non-timeout exceptions."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -631,7 +631,7 @@ class TestTimeoutComprehensive:
         class MetadataStreamProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="Hello", is_final=False)
                 yield StreamChunk(delta=" world", is_final=False)
@@ -697,12 +697,12 @@ class TestTimeoutComprehensive:
     async def test_timeout_with_streaming_and_composition(self) -> None:
         """Timeout works correctly with streaming in middleware stack."""
         import asyncio
-        from mada_modelkit.middleware.cost_control import CostControlMiddleware
+        from madakit.middleware.cost_control import CostControlMiddleware
 
         class TokenCountingStreamProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="test", is_final=False)
                 yield StreamChunk(delta="", is_final=True, metadata={"input_tokens": 10, "output_tokens": 20})

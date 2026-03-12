@@ -21,10 +21,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mada_modelkit._base import BaseAgentClient
-from mada_modelkit._errors import ProviderError
-from mada_modelkit._types import AgentRequest, AgentResponse
-from mada_modelkit.providers.native.llamacpp import LlamaCppClient
+from madakit._base import BaseAgentClient
+from madakit._errors import ProviderError
+from madakit._types import AgentRequest, AgentResponse
+from madakit.providers.native.llamacpp import LlamaCppClient
 
 
 # ---------------------------------------------------------------------------
@@ -37,13 +37,13 @@ class TestModuleExports:
 
     def test_llamacpp_client_in_all(self) -> None:
         """LlamaCppClient is listed in __all__."""
-        from mada_modelkit.providers.native import llamacpp
+        from madakit.providers.native import llamacpp
 
         assert "LlamaCppClient" in llamacpp.__all__
 
     def test_llamacpp_client_importable(self) -> None:
         """LlamaCppClient can be imported directly from its module."""
-        from mada_modelkit.providers.native.llamacpp import LlamaCppClient as LC
+        from madakit.providers.native.llamacpp import LlamaCppClient as LC
 
         assert LC is LlamaCppClient
 
@@ -53,7 +53,7 @@ class TestModuleExports:
 
     def test_llamacpp_client_is_not_subclass_of_http_client(self) -> None:
         """LlamaCppClient does NOT inherit from HttpAgentClient (no HTTP)."""
-        from mada_modelkit.providers._http_base import HttpAgentClient
+        from madakit.providers._http_base import HttpAgentClient
 
         assert not issubclass(LlamaCppClient, HttpAgentClient)
 
@@ -232,7 +232,7 @@ class TestAenter:
         import sys
 
         # llamacpp module is importable without llama_cpp installed.
-        import mada_modelkit.providers.native.llamacpp  # noqa: F401
+        import madakit.providers.native.llamacpp  # noqa: F401
 
         assert "llama_cpp" not in sys.modules
 
@@ -645,7 +645,7 @@ class TestIntegration:
     @pytest.mark.asyncio
     async def test_stacked_with_retry_middleware(self) -> None:
         """LlamaCppClient works correctly when wrapped with RetryMiddleware."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         mock_llm = MagicMock(return_value=_llm_output(text="retried response"))
         with patch.object(LlamaCppClient, "_load_model", return_value=mock_llm):

@@ -12,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from mada_modelkit.config._schema import (
+from madakit.config._schema import (
     MiddlewareConfig,
     ProviderConfig,
     StackConfig,
 )
-from mada_modelkit.config.loader import ConfigError, ConfigLoader
+from madakit.config.loader import ConfigError, ConfigLoader
 
 
 class TestModuleExports:
@@ -25,14 +25,14 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains loader classes."""
-        from mada_modelkit.config import loader
+        from madakit.config import loader
 
         assert set(loader.__all__) == {"ConfigLoader", "ConfigError"}
 
     def test_loader_importable(self) -> None:
         """Loader classes importable from config module."""
-        from mada_modelkit.config import ConfigError as CE
-        from mada_modelkit.config import ConfigLoader as CL
+        from madakit.config import ConfigError as CE
+        from madakit.config import ConfigLoader as CL
 
         assert CL is not None
         assert CE is not None
@@ -439,7 +439,7 @@ class TestStackBuilder:
         # Should not raise (but will fail without httpx installed)
         try:
             client = ConfigLoader.build_stack(config)
-            from mada_modelkit.providers.cloud.openai import OpenAIClient
+            from madakit.providers.cloud.openai import OpenAIClient
             assert isinstance(client, OpenAIClient)
         except ImportError:
             pytest.skip("httpx not installed")
@@ -455,7 +455,7 @@ class TestStackBuilder:
 
         try:
             client = ConfigLoader.build_stack(config)
-            from mada_modelkit.middleware.retry import RetryMiddleware
+            from madakit.middleware.retry import RetryMiddleware
             assert isinstance(client, RetryMiddleware)
         except ImportError:
             pytest.skip("httpx not installed")
@@ -472,7 +472,7 @@ class TestStackBuilder:
 
         try:
             client = ConfigLoader.build_stack(config)
-            from mada_modelkit.middleware.retry import RetryMiddleware
+            from madakit.middleware.retry import RetryMiddleware
             # Middleware list is reversed, so retry (first in list) becomes innermost,
             # cache (last) becomes outermost, wrapping retry
             # But we reversed again in build_stack, so: provider → cache → retry

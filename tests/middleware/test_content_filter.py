@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._errors import MiddlewareError
-from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
-from mada_modelkit.middleware.content_filter import ContentFilterMiddleware
+from madakit._errors import MiddlewareError
+from madakit._types import AgentRequest, AgentResponse, StreamChunk
+from madakit.middleware.content_filter import ContentFilterMiddleware
 
 from helpers import MockProvider
 
@@ -20,13 +20,13 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains only ContentFilterMiddleware."""
-        from mada_modelkit.middleware import content_filter
+        from madakit.middleware import content_filter
 
         assert content_filter.__all__ == ["ContentFilterMiddleware"]
 
     def test_middleware_importable(self) -> None:
         """ContentFilterMiddleware can be imported from module."""
-        from mada_modelkit.middleware.content_filter import (
+        from madakit.middleware.content_filter import (
             ContentFilterMiddleware as CFM,
         )
 

@@ -1,4 +1,4 @@
-"""Tests for mada_modelkit._base.
+"""Tests for madakit._base.
 
 Covers BaseAgentClient: abstract enforcement, concrete subclass instantiation,
 send_request and send_request_stream (default and native-streaming override),
@@ -17,8 +17,8 @@ from typing import AsyncIterator
 
 from helpers import MockProvider
 
-from mada_modelkit._base import BaseAgentClient
-from mada_modelkit._types import AgentRequest, AgentResponse, StreamChunk
+from madakit._base import BaseAgentClient
+from madakit._types import AgentRequest, AgentResponse, StreamChunk
 
 
 class _ConcreteClient(BaseAgentClient):
@@ -424,7 +424,7 @@ class TestMockProvider:
     @pytest.mark.asyncio
     async def test_pre_loaded_error(self) -> None:
         """MockProvider raises queued errors in order."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         provider = MockProvider(errors=[ProviderError("boom", status_code=500)])
         with pytest.raises(ProviderError):

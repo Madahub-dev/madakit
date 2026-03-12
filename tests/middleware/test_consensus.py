@@ -9,9 +9,9 @@ import asyncio
 
 import pytest
 
-from mada_modelkit._errors import MiddlewareError
-from mada_modelkit._types import AgentRequest, AgentResponse
-from mada_modelkit.middleware.consensus import ConsensusMiddleware
+from madakit._errors import MiddlewareError
+from madakit._types import AgentRequest, AgentResponse
+from madakit.middleware.consensus import ConsensusMiddleware
 
 from helpers import MockProvider
 
@@ -20,12 +20,12 @@ class TestModuleExports:
     """Verify consensus module exports."""
 
     def test_module_has_all(self) -> None:
-        from mada_modelkit.middleware import consensus
+        from madakit.middleware import consensus
 
         assert hasattr(consensus, "__all__")
 
     def test_all_contains_consensus_middleware(self) -> None:
-        from mada_modelkit.middleware.consensus import __all__
+        from madakit.middleware.consensus import __all__
 
         assert "ConsensusMiddleware" in __all__
 

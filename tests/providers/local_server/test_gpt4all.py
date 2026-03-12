@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._types import AgentRequest
-from mada_modelkit.providers.local_server.gpt4all import GPT4AllClient
+from madakit._types import AgentRequest
+from madakit.providers.local_server.gpt4all import GPT4AllClient
 
 
 class TestModuleExports:
@@ -16,13 +16,13 @@ class TestModuleExports:
 
     def test_module_has_all(self) -> None:
         """Module exports __all__."""
-        from mada_modelkit.providers.local_server import gpt4all
+        from madakit.providers.local_server import gpt4all
 
         assert hasattr(gpt4all, "__all__")
 
     def test_all_contains_gpt4all_client(self) -> None:
         """__all__ contains GPT4AllClient."""
-        from mada_modelkit.providers.local_server.gpt4all import __all__
+        from madakit.providers.local_server.gpt4all import __all__
 
         assert "GPT4AllClient" in __all__
 

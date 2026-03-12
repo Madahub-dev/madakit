@@ -1,5 +1,5 @@
 [project]
-name = "mada-modelkit"
+name = "madakit"
 version = "0.1.0"
 description = "Composable AI client library — cloud, local, and native providers behind one interface"
 requires-python = ">=3.11"
@@ -46,7 +46,7 @@ all = ["httpx>=0.27", "llama-cpp-python>=0.2", "transformers>=4.40", "torch>=2.0
 
 [project.urls]
 Homepage = "https://madahub.org"
-Repository = "https://github.com/madahub/mada-modelkit"
+Repository = "https://github.com/madahub/madakit"
 
 [build-system]
 requires = ["setuptools>=68.0"]

@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._types import AgentRequest
-from mada_modelkit.providers.cloud.replicate import ReplicateClient
+from madakit._types import AgentRequest
+from madakit.providers.cloud.replicate import ReplicateClient
 
 
 class TestModuleExports:
@@ -16,13 +16,13 @@ class TestModuleExports:
 
     def test_module_has_all(self) -> None:
         """Module exports __all__."""
-        from mada_modelkit.providers.cloud import replicate
+        from madakit.providers.cloud import replicate
 
         assert hasattr(replicate, "__all__")
 
     def test_all_contains_replicate_client(self) -> None:
         """__all__ contains ReplicateClient."""
-        from mada_modelkit.providers.cloud.replicate import __all__
+        from madakit.providers.cloud.replicate import __all__
 
         assert "ReplicateClient" in __all__
 

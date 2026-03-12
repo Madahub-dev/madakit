@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit.config._schema import (
+from madakit.config._schema import (
     MiddlewareConfig,
     ProviderConfig,
     StackConfig,
@@ -20,13 +20,13 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains config classes."""
-        from mada_modelkit.config import _schema
+        from madakit.config import _schema
 
         assert set(_schema.__all__) == {"ProviderConfig", "MiddlewareConfig", "StackConfig"}
 
     def test_schema_importable(self) -> None:
         """Schema classes importable from config module."""
-        from mada_modelkit.config import (
+        from madakit.config import (
             MiddlewareConfig as MC,
             ProviderConfig as PC,
             StackConfig as SC,

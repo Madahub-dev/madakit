@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from helpers import MockProvider
-from mada_modelkit import (
+from madakit import (
     AgentRequest,
     AgentResponse,
     CachingMiddleware,
@@ -13,7 +13,7 @@ from mada_modelkit import (
     RetryMiddleware,
     TrackingMiddleware,
 )
-from mada_modelkit._errors import ProviderError
+from madakit._errors import ProviderError
 
 
 class TestCloudE2EHappyPath:
@@ -55,7 +55,7 @@ class TestFallbackWithCircuitBreaker:
     """Circuit breaker triggers fallback recovery."""
 
     async def test_circuit_breaker_recovery(self) -> None:
-        from mada_modelkit._errors import RetryExhaustedError
+        from madakit._errors import RetryExhaustedError
 
         provider = MockProvider(
             errors=[ProviderError("timeout", status_code=503)],

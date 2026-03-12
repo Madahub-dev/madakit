@@ -23,11 +23,11 @@ import json
 import httpx
 import pytest
 
-from mada_modelkit._errors import ProviderError
-from mada_modelkit._types import AgentRequest, StreamChunk
-from mada_modelkit.providers._http_base import HttpAgentClient
-from mada_modelkit.providers._openai_compat import OpenAICompatMixin
-from mada_modelkit.providers.cloud.openai import OpenAIClient
+from madakit._errors import ProviderError
+from madakit._types import AgentRequest, StreamChunk
+from madakit.providers._http_base import HttpAgentClient
+from madakit.providers._openai_compat import OpenAICompatMixin
+from madakit.providers.cloud.openai import OpenAIClient
 
 
 class TestOpenAIClientConstructor:
@@ -184,17 +184,17 @@ class TestModuleExports:
 
     def test_all_is_defined(self) -> None:
         """Asserts that __all__ is defined in providers.cloud.openai."""
-        import mada_modelkit.providers.cloud.openai as mod
+        import madakit.providers.cloud.openai as mod
         assert hasattr(mod, "__all__")
 
     def test_openai_client_in_all(self) -> None:
         """Asserts that 'OpenAIClient' is listed in __all__."""
-        import mada_modelkit.providers.cloud.openai as mod
+        import madakit.providers.cloud.openai as mod
         assert "OpenAIClient" in mod.__all__
 
     def test_openai_client_importable(self) -> None:
         """Asserts that OpenAIClient can be imported from the module."""
-        from mada_modelkit.providers.cloud.openai import OpenAIClient as OAC
+        from madakit.providers.cloud.openai import OpenAIClient as OAC
         assert OAC is OpenAIClient
 
 
@@ -389,7 +389,7 @@ class TestIntegration:
 
     async def test_send_request_returns_agent_response(self) -> None:
         """Asserts that send_request returns an AgentResponse with correct content."""
-        from mada_modelkit._types import AgentResponse
+        from madakit._types import AgentResponse
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=_json_response("The answer is 42."))

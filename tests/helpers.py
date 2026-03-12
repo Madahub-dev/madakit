@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import asyncio
 
-from mada_modelkit._base import BaseAgentClient
-from mada_modelkit._types import AgentRequest, AgentResponse
+from madakit._base import BaseAgentClient
+from madakit._types import AgentRequest, AgentResponse
 
 
 class MockProvider(BaseAgentClient):

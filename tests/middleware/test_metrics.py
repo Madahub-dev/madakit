@@ -13,8 +13,8 @@ pytest.importorskip("prometheus_client")
 
 from prometheus_client import CollectorRegistry
 
-from mada_modelkit.middleware.metrics import MetricsMiddleware
-from mada_modelkit._types import AgentRequest, AgentResponse
+from madakit.middleware.metrics import MetricsMiddleware
+from madakit._types import AgentRequest, AgentResponse
 
 from helpers import MockProvider
 
@@ -24,13 +24,13 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains only MetricsMiddleware."""
-        from mada_modelkit.middleware import metrics
+        from madakit.middleware import metrics
 
         assert metrics.__all__ == ["MetricsMiddleware"]
 
     def test_middleware_importable(self) -> None:
         """MetricsMiddleware can be imported from module."""
-        from mada_modelkit.middleware.metrics import MetricsMiddleware as MM
+        from madakit.middleware.metrics import MetricsMiddleware as MM
 
         assert MM is not None
 
@@ -92,7 +92,7 @@ class TestMetricsMiddlewareConstructor:
 
     def test_wraps_middleware(self) -> None:
         """MetricsMiddleware can wrap another middleware."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         mock = MockProvider()
         retry_mw = RetryMiddleware(client=mock, max_retries=3)
@@ -175,7 +175,7 @@ class TestCounterMetrics:
         class MultiChunkProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk", is_final=True)
 
@@ -197,7 +197,7 @@ class TestCounterMetrics:
     async def test_errors_total_increments_on_error(self) -> None:
         """errors_total counter increments when request fails."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -220,7 +220,7 @@ class TestCounterMetrics:
     async def test_errors_total_has_error_type_label(self) -> None:
         """errors_total uses error_type label correctly."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -243,7 +243,7 @@ class TestCounterMetrics:
     async def test_different_error_types_tracked_separately(self) -> None:
         """Different error types tracked with separate labels."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class VariableErrorProvider(MockProvider):
             def __init__(self):
@@ -303,7 +303,7 @@ class TestCounterMetrics:
     async def test_stream_errors_increment_counter(self) -> None:
         """Stream errors increment error counter."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingStreamProvider(MockProvider):
             async def send_request_stream(self, request):
@@ -333,7 +333,7 @@ class TestCounterMetrics:
         class StreamProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="test", is_final=True)
 
@@ -395,7 +395,7 @@ class TestHistogramMetrics:
         class StreamProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk", is_final=True)
 
@@ -452,7 +452,7 @@ class TestHistogramMetrics:
         class StreamProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="first", is_final=False)
                 yield StreamChunk(delta="second", is_final=True)
@@ -478,7 +478,7 @@ class TestHistogramMetrics:
         class MultiChunkProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
                 import asyncio
 
                 await asyncio.sleep(0.01)
@@ -508,7 +508,7 @@ class TestHistogramMetrics:
         class MetadataStreamProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk1", is_final=False)
                 yield StreamChunk(
@@ -559,7 +559,7 @@ class TestHistogramMetrics:
     async def test_errors_dont_record_histogram_metrics(self) -> None:
         """Failed requests don't record histogram metrics."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -587,7 +587,7 @@ class TestHistogramMetrics:
         class NoTokensProvider(MockProvider):
             async def send_request(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import AgentResponse
+                from madakit._types import AgentResponse
 
                 return AgentResponse(
                     content="test",
@@ -622,7 +622,7 @@ class TestHistogramMetrics:
 
             async def send_request(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import AgentResponse
+                from madakit._types import AgentResponse
 
                 # Return different token counts for each call
                 return AgentResponse(
@@ -724,7 +724,7 @@ class TestGaugeMetrics:
     async def test_active_requests_decrements_on_error(self) -> None:
         """active_requests decrements even when request fails."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -789,7 +789,7 @@ class TestGaugeMetrics:
         class StreamProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk1", is_final=False)
                 yield StreamChunk(delta="chunk2", is_final=True)
@@ -819,7 +819,7 @@ class TestGaugeMetrics:
         class SlowStreamProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk1", is_final=False)
                 await asyncio.sleep(0.05)
@@ -855,7 +855,7 @@ class TestGaugeMetrics:
     async def test_active_requests_stream_decrements_on_error(self) -> None:
         """active_requests decrements when stream fails."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingStreamProvider(MockProvider):
             async def send_request_stream(self, request):
@@ -888,7 +888,7 @@ class TestGaugeMetrics:
                 return await super().send_request(request)
 
             async def send_request_stream(self, request):
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
                 await asyncio.sleep(0.05)
                 yield StreamChunk(delta="test", is_final=True)
 
@@ -1009,7 +1009,7 @@ class TestLabelSupport:
 
             async def send_request(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import AgentResponse
+                from madakit._types import AgentResponse
 
                 model = f"model-{self.call_count}"
                 return AgentResponse(
@@ -1046,7 +1046,7 @@ class TestLabelSupport:
     async def test_error_status_label_on_failure(self) -> None:
         """Error requests tagged with status=error."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -1071,7 +1071,7 @@ class TestLabelSupport:
     async def test_errors_total_with_model_label(self) -> None:
         """errors_total includes model label when track_labels enabled."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -1126,7 +1126,7 @@ class TestLabelSupport:
         class LabeledStreamProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk1", is_final=False)
                 yield StreamChunk(
@@ -1166,7 +1166,7 @@ class TestLabelSupport:
 
         class NoModelProvider(MockProvider):
             async def send_request(self, request):
-                from mada_modelkit._types import AgentResponse
+                from madakit._types import AgentResponse
 
                 return AgentResponse(
                     content="test",
@@ -1207,7 +1207,7 @@ class TestLabelSupport:
     async def test_mixed_success_and_error_status(self) -> None:
         """Success and error requests tracked separately by status."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class SometimesFailingProvider(MockProvider):
             def __init__(self):
@@ -1287,7 +1287,7 @@ class TestMetricsComprehensive:
         class StreamProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="chunk1", is_final=False)
                 yield StreamChunk(
@@ -1327,8 +1327,8 @@ class TestMetricsComprehensive:
     async def test_middleware_composition_with_retry(self) -> None:
         """MetricsMiddleware composes with RetryMiddleware."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit.middleware.retry import RetryMiddleware
-        from mada_modelkit._errors import ProviderError
+        from madakit.middleware.retry import RetryMiddleware
+        from madakit._errors import ProviderError
 
         class FailTwiceProvider(MockProvider):
             def __init__(self):
@@ -1361,7 +1361,7 @@ class TestMetricsComprehensive:
     async def test_middleware_composition_with_cost_control(self) -> None:
         """MetricsMiddleware composes with CostControlMiddleware."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit.middleware.cost_control import CostControlMiddleware
+        from madakit.middleware.cost_control import CostControlMiddleware
 
         mock = MockProvider()
         registry = CollectorRegistry()
@@ -1437,7 +1437,7 @@ class TestMetricsComprehensive:
         class DualProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
 
                 yield StreamChunk(delta="test", is_final=True)
 
@@ -1466,7 +1466,7 @@ class TestMetricsComprehensive:
     async def test_error_scenarios_proper_metrics(self) -> None:
         """Error scenarios record proper error metrics."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class AlwaysFailProvider(MockProvider):
             async def send_request(self, request):
@@ -1514,7 +1514,7 @@ class TestMetricsComprehensive:
 
             async def send_request(self, request):
                 self.request_count += 1
-                from mada_modelkit._types import AgentResponse
+                from madakit._types import AgentResponse
 
                 # Alternate between two models
                 model = "model-a" if self.request_count % 2 == 1 else "model-b"
@@ -1592,7 +1592,7 @@ class TestMetricsComprehensive:
     async def test_exception_propagation_preserves_stack_trace(self) -> None:
         """Exceptions propagate with full stack trace."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingProvider(MockProvider):
             async def send_request(self, request):
@@ -1630,7 +1630,7 @@ class TestMetricsComprehensive:
     async def test_zero_active_requests_after_many_operations(self) -> None:
         """Active requests gauge returns to 0 after many operations."""
         from prometheus_client import CollectorRegistry
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class SometimesFailProvider(MockProvider):
             def __init__(self):

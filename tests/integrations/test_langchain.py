@@ -18,7 +18,7 @@ except ImportError:
     LANGCHAIN_AVAILABLE = False
 
 if LANGCHAIN_AVAILABLE:
-    from mada_modelkit.integrations.langchain import MadaKitLLM
+    from madakit.integrations.langchain import MadaKitLLM
 
 from helpers import MockProvider
 
@@ -32,13 +32,13 @@ class TestModuleExports:
 
     def test_module_has_all(self) -> None:
         """Module exports __all__."""
-        from mada_modelkit.integrations import langchain
+        from madakit.integrations import langchain
 
         assert hasattr(langchain, "__all__")
 
     def test_all_contains_madakit_llm(self) -> None:
         """__all__ contains MadaKitLLM."""
-        from mada_modelkit.integrations.langchain import __all__
+        from madakit.integrations.langchain import __all__
 
         assert "MadaKitLLM" in __all__
 

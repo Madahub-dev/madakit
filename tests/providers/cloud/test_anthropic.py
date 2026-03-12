@@ -22,10 +22,10 @@ import json
 import httpx
 import pytest
 
-from mada_modelkit._errors import ProviderError
-from mada_modelkit._types import AgentRequest, AgentResponse, Attachment
-from mada_modelkit.providers._http_base import HttpAgentClient
-from mada_modelkit.providers.cloud.anthropic import AnthropicClient
+from madakit._errors import ProviderError
+from madakit._types import AgentRequest, AgentResponse, Attachment
+from madakit.providers._http_base import HttpAgentClient
+from madakit.providers.cloud.anthropic import AnthropicClient
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -64,13 +64,13 @@ class TestModuleExports:
 
     def test_anthropic_client_in_all(self) -> None:
         """AnthropicClient is listed in __all__."""
-        from mada_modelkit.providers.cloud import anthropic
+        from madakit.providers.cloud import anthropic
 
         assert "AnthropicClient" in anthropic.__all__
 
     def test_anthropic_client_importable(self) -> None:
         """AnthropicClient can be imported directly from its module."""
-        from mada_modelkit.providers.cloud.anthropic import AnthropicClient as AC
+        from madakit.providers.cloud.anthropic import AnthropicClient as AC
 
         assert AC is AnthropicClient
 

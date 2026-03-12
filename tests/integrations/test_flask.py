@@ -16,7 +16,7 @@ except ImportError:
     FLASK_AVAILABLE = False
 
 if FLASK_AVAILABLE:
-    from mada_modelkit.integrations.flask import MadaKit, stream_response
+    from madakit.integrations.flask import MadaKit, stream_response
 
 from helpers import MockProvider
 
@@ -30,19 +30,19 @@ class TestModuleExports:
 
     def test_module_has_all(self) -> None:
         """Module exports __all__."""
-        from mada_modelkit.integrations import flask
+        from madakit.integrations import flask
 
         assert hasattr(flask, "__all__")
 
     def test_all_contains_madakit(self) -> None:
         """__all__ contains MadaKit."""
-        from mada_modelkit.integrations.flask import __all__
+        from madakit.integrations.flask import __all__
 
         assert "MadaKit" in __all__
 
     def test_all_contains_stream_response(self) -> None:
         """__all__ contains stream_response."""
-        from mada_modelkit.integrations.flask import __all__
+        from madakit.integrations.flask import __all__
 
         assert "stream_response" in __all__
 
@@ -104,7 +104,7 @@ class TestStreamResponse:
     def test_stream_response_creates_response(self) -> None:
         """stream_response creates Flask Response."""
         client = MockProvider()
-        from mada_modelkit._types import AgentRequest
+        from madakit._types import AgentRequest
 
         request = AgentRequest(prompt="Hello")
         response = stream_response(client, request)
@@ -114,7 +114,7 @@ class TestStreamResponse:
     def test_stream_response_is_generator(self) -> None:
         """stream_response returns generator response."""
         client = MockProvider()
-        from mada_modelkit._types import AgentRequest
+        from madakit._types import AgentRequest
 
         request = AgentRequest(prompt="Test")
         response = stream_response(client, request)

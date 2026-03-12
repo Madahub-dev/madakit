@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from mada_modelkit._types import AgentRequest
-from mada_modelkit.providers.specialized.elevenlabs import ElevenLabsClient
+from madakit._types import AgentRequest
+from madakit.providers.specialized.elevenlabs import ElevenLabsClient
 
 
 class TestModuleExports:
@@ -16,13 +16,13 @@ class TestModuleExports:
 
     def test_module_has_all(self) -> None:
         """Module exports __all__."""
-        from mada_modelkit.providers.specialized import elevenlabs
+        from madakit.providers.specialized import elevenlabs
 
         assert hasattr(elevenlabs, "__all__")
 
     def test_all_contains_elevenlabs_client(self) -> None:
         """__all__ contains ElevenLabsClient."""
-        from mada_modelkit.providers.specialized.elevenlabs import __all__
+        from madakit.providers.specialized.elevenlabs import __all__
 
         assert "ElevenLabsClient" in __all__
 

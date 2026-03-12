@@ -18,11 +18,11 @@ import json
 import httpx
 import pytest
 
-from mada_modelkit._errors import ProviderError
-from mada_modelkit._types import AgentRequest, AgentResponse, Attachment
-from mada_modelkit.providers._http_base import HttpAgentClient
-from mada_modelkit.providers._openai_compat import OpenAICompatMixin
-from mada_modelkit.providers.local_server.vllm import VllmClient
+from madakit._errors import ProviderError
+from madakit._types import AgentRequest, AgentResponse, Attachment
+from madakit.providers._http_base import HttpAgentClient
+from madakit.providers._openai_compat import OpenAICompatMixin
+from madakit.providers.local_server.vllm import VllmClient
 
 
 # ---------------------------------------------------------------------------
@@ -35,13 +35,13 @@ class TestModuleExports:
 
     def test_vllm_client_in_all(self) -> None:
         """VllmClient is listed in __all__."""
-        from mada_modelkit.providers.local_server import vllm
+        from madakit.providers.local_server import vllm
 
         assert "VllmClient" in vllm.__all__
 
     def test_vllm_client_importable(self) -> None:
         """VllmClient can be imported directly from its module."""
-        from mada_modelkit.providers.local_server.vllm import VllmClient as VC
+        from madakit.providers.local_server.vllm import VllmClient as VC
 
         assert VC is VllmClient
 

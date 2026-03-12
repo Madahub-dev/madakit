@@ -11,9 +11,9 @@ import time
 
 import pytest
 
-from mada_modelkit._errors import AgentError
-from mada_modelkit._types import AgentRequest, AgentResponse
-from mada_modelkit.middleware.rate_limit import RateLimitMiddleware
+from madakit._errors import AgentError
+from madakit._types import AgentRequest, AgentResponse
+from madakit.middleware.rate_limit import RateLimitMiddleware
 from helpers import MockProvider
 
 
@@ -22,14 +22,14 @@ class TestModuleExports:
 
     def test_all_exports(self) -> None:
         """__all__ contains RateLimitMiddleware."""
-        from mada_modelkit.middleware import rate_limit
+        from madakit.middleware import rate_limit
         assert hasattr(rate_limit, "__all__")
         assert "RateLimitMiddleware" in rate_limit.__all__
         assert len(rate_limit.__all__) == 1
 
     def test_middleware_importable(self) -> None:
         """RateLimitMiddleware is importable from rate_limit module."""
-        from mada_modelkit.middleware.rate_limit import RateLimitMiddleware as Imported
+        from madakit.middleware.rate_limit import RateLimitMiddleware as Imported
         assert Imported is RateLimitMiddleware
 
 
@@ -129,7 +129,7 @@ class TestRateLimitMiddlewareConstructor:
     def test_wraps_middleware(self) -> None:
         """Can wrap another middleware instance."""
         mock = MockProvider()
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
         retry = RetryMiddleware(client=mock, max_retries=2)
         middleware = RateLimitMiddleware(client=retry, requests_per_second=5.0)
         assert middleware._client is retry
@@ -668,7 +668,7 @@ class TestSendRequestWithRateLimit:
     @pytest.mark.asyncio
     async def test_send_request_propagates_exceptions(self) -> None:
         """send_request propagates exceptions from wrapped client."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         error = ProviderError("test error", status_code=500)
         mock = MockProvider(errors=[error])
@@ -710,7 +710,7 @@ class TestSendRequestStreamWithRateLimit:
     @pytest.mark.asyncio
     async def test_send_request_stream_token_bucket_delegates(self) -> None:
         """send_request_stream with token_bucket acquires token then streams."""
-        from mada_modelkit._types import StreamChunk
+        from madakit._types import StreamChunk
 
         mock = MockProvider()
         middleware = RateLimitMiddleware(client=mock, requests_per_second=10.0, strategy="token_bucket")
@@ -815,7 +815,7 @@ class TestSendRequestStreamWithRateLimit:
         class MultiChunkProvider(MockProvider):
             async def send_request_stream(self, request):
                 self.call_count += 1
-                from mada_modelkit._types import StreamChunk
+                from madakit._types import StreamChunk
                 yield StreamChunk(delta="chunk1", is_final=False)
                 yield StreamChunk(delta="chunk2", is_final=False)
                 yield StreamChunk(delta="chunk3", is_final=True)
@@ -840,7 +840,7 @@ class TestSendRequestStreamWithRateLimit:
     @pytest.mark.asyncio
     async def test_send_request_stream_propagates_exceptions(self) -> None:
         """send_request_stream propagates exceptions from wrapped client."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         class FailingStreamProvider(MockProvider):
             async def send_request_stream(self, request):
@@ -1260,7 +1260,7 @@ class TestRateLimitComprehensive:
     @pytest.mark.asyncio
     async def test_wraps_other_middleware(self) -> None:
         """RateLimitMiddleware can wrap other middleware."""
-        from mada_modelkit.middleware.retry import RetryMiddleware
+        from madakit.middleware.retry import RetryMiddleware
 
         mock = MockProvider()
         retry = RetryMiddleware(client=mock, max_retries=2)
@@ -1347,7 +1347,7 @@ class TestRateLimitComprehensive:
     @pytest.mark.asyncio
     async def test_exception_doesnt_consume_token(self) -> None:
         """Exceptions after token acquisition don't affect rate limit state."""
-        from mada_modelkit._errors import ProviderError
+        from madakit._errors import ProviderError
 
         error = ProviderError("test error")
         mock = MockProvider(errors=[error])
