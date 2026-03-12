@@ -8,6 +8,7 @@ from mada_modelkit.middleware.ab_test import ABTestMiddleware
 from mada_modelkit.middleware.batching import BatchingMiddleware
 from mada_modelkit.middleware.cache import CachingMiddleware
 from mada_modelkit.middleware.circuit_breaker import CircuitBreakerMiddleware
+from mada_modelkit.middleware.consensus import ConsensusMiddleware
 from mada_modelkit.middleware.content_filter import ContentFilterMiddleware
 from mada_modelkit.middleware.fallback import FallbackMiddleware
 from mada_modelkit.middleware.function_calling import FunctionCallingMiddleware
@@ -21,6 +22,7 @@ __all__ = [
     "BatchingMiddleware",
     "CachingMiddleware",
     "CircuitBreakerMiddleware",
+    "ConsensusMiddleware",
     "ContentFilterMiddleware",
     "FallbackMiddleware",
     "FunctionCallingMiddleware",
