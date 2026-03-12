@@ -13,10 +13,10 @@ class TestCoreImports:
 
         assert hasattr(madakit, "__all__")
 
-    def test_all_has_21_names(self) -> None:
+    def test_all_has_24_names(self) -> None:
         from madakit import __all__
 
-        assert len(__all__) == 21
+        assert len(__all__) == 24
 
     @pytest.mark.parametrize(
         "name",
@@ -33,13 +33,16 @@ class TestCoreImports:
             "RetryExhaustedError",
             "MiddlewareError",
             "ABTestMiddleware",
+            "BatchingMiddleware",
             "RetryMiddleware",
             "CircuitBreakerMiddleware",
             "CachingMiddleware",
+            "ConsensusMiddleware",
             "ContentFilterMiddleware",
             "FunctionCallingMiddleware",
             "LoadBalancingMiddleware",
             "PromptTemplateMiddleware",
+            "StreamAggregationMiddleware",
             "TrackingMiddleware",
             "FallbackMiddleware",
         ],
@@ -74,26 +77,32 @@ class TestCoreImports:
         from madakit import (
             BaseAgentClient,
             ABTestMiddleware,
+            BatchingMiddleware,
             RetryMiddleware,
             CircuitBreakerMiddleware,
             CachingMiddleware,
+            ConsensusMiddleware,
             ContentFilterMiddleware,
             FunctionCallingMiddleware,
             LoadBalancingMiddleware,
             PromptTemplateMiddleware,
+            StreamAggregationMiddleware,
             TrackingMiddleware,
             FallbackMiddleware,
         )
 
         for cls in [
             ABTestMiddleware,
+            BatchingMiddleware,
             RetryMiddleware,
             CircuitBreakerMiddleware,
             CachingMiddleware,
+            ConsensusMiddleware,
             ContentFilterMiddleware,
             FunctionCallingMiddleware,
             LoadBalancingMiddleware,
             PromptTemplateMiddleware,
+            StreamAggregationMiddleware,
             TrackingMiddleware,
             FallbackMiddleware,
         ]:
