@@ -3,8 +3,8 @@ site_url: https://madakit.readthedocs.io
 site_description: Composable AI client library — cloud, local, and native providers behind one async interface, layered with middleware.
 site_author: Mada Hub
 
-repo_name: madahub/madakit
-repo_url: https://github.com/madahub/madakit
+repo_name: Madahub-dev/madakit
+repo_url: https://github.com/Madahub-dev/madakit
 edit_uri: edit/main/docs/
 
 theme:
@@ -79,7 +79,7 @@ nav:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/madahub/madakit
+      link: https://github.com/Madahub-dev/madakit
     - icon: fontawesome/brands/python
       link: https://pypi.org/project/madakit/
 

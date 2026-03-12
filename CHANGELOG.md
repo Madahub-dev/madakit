@@ -111,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Package renamed** — `mada-modelkit` → `madakit` (shorter, cleaner)
   - **Install:** `pip install madakit` (was `pip install mada-modelkit`)
   - **Import:** `from madakit import *` (was `from mada_modelkit import *`)
-  - **Repository:** `github.com/madahub/madakit` (was `github.com/madahub/mada-modelkit`)
+  - **Repository:** `github.com/Madahub-dev/madakit` (was `github.com/madahub/mada-modelkit`)
 
 ### Fixed
 - **Import tests** — updated for 24 exported names (added BatchingMiddleware, ConsensusMiddleware, StreamAggregationMiddleware)
@@ -135,6 +135,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/madahub/madakit/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/madahub/madakit/releases/tag/v1.0.0
-[0.1.0]: https://github.com/madahub/madakit/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Madahub-dev/madakit/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Madahub-dev/madakit/releases/tag/v1.0.0
+[0.1.0]: https://github.com/Madahub-dev/madakit/releases/tag/v0.1.0

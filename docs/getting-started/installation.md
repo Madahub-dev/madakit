@@ -69,7 +69,7 @@ Installs all optional dependencies (cloud, local, native, metrics, config).
 
 ```bash
 # Clone repository
-git clone https://github.com/madahub/madakit.git
+git clone https://github.com/Madahub-dev/madakit.git
 cd madakit
 
 # Create virtual environment

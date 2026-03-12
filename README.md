@@ -274,5 +274,5 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 - **Documentation:** [readthedocs.io](https://madakit.readthedocs.io)
 - **PyPI:** [pypi.org/project/madakit](https://pypi.org/project/madakit/)
-- **GitHub:** [github.com/madahub/madakit](https://github.com/madahub/madakit)
-- **Issues:** [github.com/madahub/madakit/issues](https://github.com/madahub/madakit/issues)
+- **GitHub:** [github.com/Madahub-dev/madakit](https://github.com/Madahub-dev/madakit)
+- **Issues:** [github.com/Madahub-dev/madakit/issues](https://github.com/Madahub-dev/madakit/issues)

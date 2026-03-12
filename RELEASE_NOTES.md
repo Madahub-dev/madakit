@@ -157,9 +157,9 @@ This v1.0.0 release represents a stable foundation. Future plans include:
 
 madakit is open source and we welcome contributions!
 
-- **GitHub:** [madahub/madakit](https://github.com/madahub/madakit)
-- **Issues:** [Report bugs or request features](https://github.com/madahub/madakit/issues)
-- **Contributing:** [Contribution guidelines](https://github.com/madahub/madakit/blob/main/CONTRIBUTING.md)
+- **GitHub:** [Madahub-dev/madakit](https://github.com/Madahub-dev/madakit)
+- **Issues:** [Report bugs or request features](https://github.com/Madahub-dev/madakit/issues)
+- **Contributing:** [Contribution guidelines](https://github.com/Madahub-dev/madakit/blob/main/CONTRIBUTING.md)
 
 ## Acknowledgments
 
@@ -167,7 +167,7 @@ Special thanks to the Python community and the open source projects that inspire
 
 ## License
 
-madakit is licensed under the [MIT License](https://github.com/madahub/madakit/blob/main/LICENSE).
+madakit is licensed under the [MIT License](https://github.com/Madahub-dev/madakit/blob/main/LICENSE).
 
 ---
 
@@ -175,4 +175,4 @@ madakit is licensed under the [MIT License](https://github.com/madahub/madakit/b
 
 **Documentation:** [madakit.readthedocs.io](https://madakit.readthedocs.io)
 
-**GitHub:** [madahub/madakit](https://github.com/madahub/madakit)
+**GitHub:** [Madahub-dev/madakit](https://github.com/Madahub-dev/madakit)

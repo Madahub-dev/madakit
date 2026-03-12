@@ -75,9 +75,9 @@ This document outlines the steps for releasing a new version of madakit.
    - Attach distribution files to release
 
 3. Verify:
-   - Check GitHub Actions workflow: https://github.com/madahub/madakit/actions
+   - Check GitHub Actions workflow: https://github.com/Madahub-dev/madakit/actions
    - Check PyPI: https://pypi.org/project/madakit/
-   - Check GitHub release: https://github.com/madahub/madakit/releases
+   - Check GitHub release: https://github.com/Madahub-dev/madakit/releases
 
 ### 4. Announcement (Task 17.5.4)
 

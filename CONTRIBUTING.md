@@ -50,7 +50,7 @@ Violations of the Code of Conduct may be reported by contacting the project team
    ```
 3. **Add upstream remote**:
    ```bash
-   git remote add upstream https://github.com/madahub/madakit.git
+   git remote add upstream https://github.com/Madahub-dev/madakit.git
    ```
 
 ## Development Setup
@@ -187,7 +187,7 @@ git push origin feature/your-feature-name
 
 ### 5. Open a Pull Request
 
-- Go to the [madakit repository](https://github.com/madahub/madakit)
+- Go to the [madakit repository](https://github.com/Madahub-dev/madakit)
 - Click "New Pull Request"
 - Select your fork and branch
 - Fill out the PR template with:
@@ -389,8 +389,8 @@ When requesting features:
 
 For questions about usage:
 - Check the [documentation](docs/)
-- Search [existing issues](https://github.com/madahub/madakit/issues)
-- Open a [discussion](https://github.com/madahub/madakit/discussions)
+- Search [existing issues](https://github.com/Madahub-dev/madakit/issues)
+- Open a [discussion](https://github.com/Madahub-dev/madakit/discussions)
 
 ## Recognition
 

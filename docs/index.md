@@ -174,10 +174,10 @@ client = LoggingMiddleware(
 
 ## Community
 
-- **GitHub:** [madahub/madakit](https://github.com/madahub/madakit)
-- **Issues:** [Report bugs or request features](https://github.com/madahub/madakit/issues)
+- **GitHub:** [Madahub-dev/madakit](https://github.com/Madahub-dev/madakit)
+- **Issues:** [Report bugs or request features](https://github.com/Madahub-dev/madakit/issues)
 - **Contributing:** [Contribution guidelines](contributing.md)
 
 ## License
 
-madakit is licensed under the [MIT License](https://github.com/madahub/madakit/blob/main/LICENSE).
+madakit is licensed under the [MIT License](https://github.com/Madahub-dev/madakit/blob/main/LICENSE).
