@@ -41,6 +41,8 @@ native = ["llama-cpp-python>=0.2", "transformers>=4.40", "torch>=2.0"]
 metrics = ["prometheus-client>=0.20"]
 # Configuration (optional)
 config = ["pyyaml>=6.0"]
+# Documentation
+docs = ["mkdocs>=1.5", "mkdocs-material>=9.5", "mkdocs-autorefs>=1.0"]
 # Everything
 all = ["httpx>=0.27", "llama-cpp-python>=0.2", "transformers>=4.40", "torch>=2.0", "prometheus-client>=0.20", "pyyaml>=6.0"]
 
