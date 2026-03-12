@@ -15,6 +15,7 @@ from mada_modelkit.middleware.function_calling import FunctionCallingMiddleware
 from mada_modelkit.middleware.load_balancing import LoadBalancingMiddleware
 from mada_modelkit.middleware.prompt_template import PromptTemplateMiddleware
 from mada_modelkit.middleware.retry import RetryMiddleware
+from mada_modelkit.middleware.stream_aggregation import StreamAggregationMiddleware
 from mada_modelkit.middleware.tracking import TrackingMiddleware
 
 __all__ = [
@@ -29,5 +30,6 @@ __all__ = [
     "LoadBalancingMiddleware",
     "PromptTemplateMiddleware",
     "RetryMiddleware",
+    "StreamAggregationMiddleware",
     "TrackingMiddleware",
 ]

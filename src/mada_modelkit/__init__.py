@@ -30,6 +30,7 @@ from mada_modelkit.middleware import (
     LoadBalancingMiddleware,
     PromptTemplateMiddleware,
     RetryMiddleware,
+    StreamAggregationMiddleware,
     TrackingMiddleware,
 )
 
@@ -55,6 +56,7 @@ __all__ = [
     "FunctionCallingMiddleware",
     "LoadBalancingMiddleware",
     "PromptTemplateMiddleware",
+    "StreamAggregationMiddleware",
     "TrackingMiddleware",
     "FallbackMiddleware",
 ]
